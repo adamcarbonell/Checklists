@@ -52,7 +52,7 @@
                 "spec": {
                   "name": "checklists-web",
                   "description": "Checklist authoring web service",
-                  "billing": { "deploymentPlan": "nf-compute-20", "buildPlan": "nf-compute-200-8" },
+                  "billing": { "deploymentPlan": "nf-compute-20" },
                   "deployment": {
                     "instances": 1,
                     "docker": { "configType": "default" },
@@ -102,7 +102,7 @@
                 "spec": {
                   "name": "checklists-migrate",
                   "description": "Apply Drizzle migrations and safe seed data before release",
-                  "billing": { "deploymentPlan": "nf-compute-20", "buildPlan": "nf-compute-200-8" },
+                  "billing": { "deploymentPlan": "nf-compute-20" },
                   "deployment": {
                     "vcs": { "projectType": "github", "projectUrl": "https://github.com/adamcarbonell/Checklists", "projectBranch": "main" },
                     "docker": { "configType": "customCommand", "customCommand": "node node_modules/tsx/dist/cli.mjs scripts/migrate.ts && node node_modules/tsx/dist/cli.mjs scripts/seed.ts" },
@@ -120,7 +120,7 @@
                 "spec": {
                   "name": "checklists-itglue-sync",
                   "description": "Read-only normalized IT Glue synchronization",
-                  "billing": { "deploymentPlan": "nf-compute-20", "buildPlan": "nf-compute-200-8" },
+                  "billing": { "deploymentPlan": "nf-compute-20" },
                   "deployment": {
                     "vcs": { "projectType": "github", "projectUrl": "https://github.com/adamcarbonell/Checklists", "projectBranch": "main" },
                     "docker": { "configType": "customCommand", "customCommand": "node node_modules/tsx/dist/cli.mjs scripts/sync-itglue.ts" },
