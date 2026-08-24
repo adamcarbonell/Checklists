@@ -1,0 +1,39 @@
+{
+  "$schema": "https://api.northflank.com/v1/schemas/release-flow",
+  "apiVersion": "v1.2",
+  "options": { "concurrencyPolicy": "forbid", "paused": false },
+  "spec": {
+    "kind": "Workflow",
+    "spec": {
+      "type": "sequential",
+      "steps": [
+        {
+          "kind": "Release",
+          "spec": {
+            "type": "build",
+            "origin": { "id": "checklists-web", "branch": "main", "build": "latest" },
+            "target": { "id": "checklists-migrate", "type": "job" }
+          }
+        },
+        { "kind": "JobRun", "spec": { "jobId": "checklists-migrate" }, "condition": "success" },
+        {
+          "kind": "Release",
+          "spec": {
+            "type": "build",
+            "origin": { "id": "checklists-web", "branch": "main", "build": "latest" },
+            "target": { "id": "checklists-web", "type": "service" }
+          }
+        }
+      ]
+    }
+  },
+  "triggers": [
+    {
+      "vcsService": "github",
+      "repoUrl": "https://github.com/adamcarbonell/Checklists",
+      "branchNamePatterns": ["main"],
+      "pathIgnoreRules": ["README.md", "docs/**"],
+      "ciIgnoreFlags": ["[skip nf]", "[skip northflank]"]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+.git
+.next
+node_modules
+.pnpm-store
+checklists-app-seed
+coverage
+.env*
+!.env.example
+*.log

@@ -1,0 +1,159 @@
+{
+  "$schema": "https://api.northflank.com/v1/schemas/template",
+  "apiVersion": "v1.2",
+  "name": "Checklists",
+  "description": "Organization-aware checklist editor with PostgreSQL and read-only IT Glue synchronization.",
+  "options": {
+    "autorun": true,
+    "concurrencyPolicy": "forbid"
+  },
+  "spec": {
+    "kind": "Workflow",
+    "spec": {
+      "type": "sequential",
+      "steps": [
+        {
+          "kind": "Project",
+          "ref": "project",
+          "spec": {
+            "name": "Checklists",
+            "description": "Private organization-aware checklist authoring",
+            "region": "us-central",
+            "networking": { "allowedIngressProjects": [] }
+          }
+        },
+        {
+          "kind": "Workflow",
+          "spec": {
+            "type": "sequential",
+            "context": { "projectId": "${refs.project.id}" },
+            "steps": [
+              {
+                "kind": "Addon",
+                "ref": "database",
+                "spec": {
+                  "name": "checklists-postgres",
+                  "type": "postgresql",
+                  "version": "16-latest",
+                  "tlsEnabled": true,
+                  "externalAccessEnabled": false,
+                  "billing": {
+                    "deploymentPlan": "nf-compute-50",
+                    "replicas": 1,
+                    "storage": 10240,
+                    "storageClass": "nvme"
+                  },
+                  "backupSchedules": []
+                }
+              },
+              {
+                "kind": "CombinedService",
+                "ref": "web",
+                "spec": {
+                  "name": "checklists-web",
+                  "description": "Checklist authoring web service",
+                  "billing": { "deploymentPlan": "nf-compute-20", "buildPlan": "nf-compute-200-8" },
+                  "deployment": {
+                    "instances": 1,
+                    "docker": { "configType": "default" },
+                    "storage": { "ephemeralStorage": { "storageSize": 1024 }, "shmSize": 64 }
+                  },
+                  "buildSource": "git",
+                  "vcsData": {
+                    "projectType": "github",
+                    "projectUrl": "https://github.com/adamcarbonell/Checklists",
+                    "projectBranch": "main"
+                  },
+                  "buildSettings": {
+                    "dockerfile": {
+                      "buildEngine": "buildkit",
+                      "dockerFilePath": "/Dockerfile",
+                      "dockerWorkDir": "/",
+                      "buildkit": { "useCache": true, "cacheStorageSize": 32768 }
+                    }
+                  },
+                  "runtimeEnvironment": {
+                    "NODE_ENV": "production",
+                    "HOSTNAME": "0.0.0.0",
+                    "PORT": "3000",
+                    "AUTH_TRUST_HOST": "true"
+                  },
+                  "ports": [
+                    {
+                      "name": "http",
+                      "internalPort": 3000,
+                      "protocol": "HTTP",
+                      "public": true,
+                      "domains": [],
+                      "disableNfDomain": false,
+                      "security": { "policies": [], "credentials": [] }
+                    }
+                  ],
+                  "healthChecks": [
+                    { "protocol": "HTTP", "type": "livenessProbe", "path": "/api/health/live", "port": 3000, "initialDelaySeconds": 10, "periodSeconds": 30, "timeoutSeconds": 3, "failureThreshold": 3, "successThreshold": 1 },
+                    { "protocol": "HTTP", "type": "readinessProbe", "path": "/api/health/ready", "port": 3000, "initialDelaySeconds": 10, "periodSeconds": 15, "timeoutSeconds": 3, "failureThreshold": 6, "successThreshold": 1 }
+                  ],
+                  "disabledCI": false
+                }
+              },
+              {
+                "kind": "ManualJob",
+                "ref": "migrate",
+                "spec": {
+                  "name": "checklists-migrate",
+                  "description": "Apply Drizzle migrations and safe seed data before release",
+                  "billing": { "deploymentPlan": "nf-compute-20", "buildPlan": "nf-compute-200-8" },
+                  "deployment": {
+                    "vcs": { "projectType": "github", "projectUrl": "https://github.com/adamcarbonell/Checklists", "projectBranch": "main" },
+                    "docker": { "configType": "customCommand", "customCommand": "node node_modules/tsx/dist/cli.mjs scripts/migrate.ts && node node_modules/tsx/dist/cli.mjs scripts/seed.ts" },
+                    "storage": { "ephemeralStorage": { "storageSize": 1024 } }
+                  },
+                  "buildSettings": { "dockerfile": { "buildEngine": "buildkit", "dockerFilePath": "/Dockerfile", "dockerWorkDir": "/" } },
+                  "backoffLimit": 2,
+                  "activeDeadlineSeconds": 1800,
+                  "runOnSourceChange": "cd-promote"
+                }
+              },
+              {
+                "kind": "CronJob",
+                "ref": "sync",
+                "spec": {
+                  "name": "checklists-itglue-sync",
+                  "description": "Read-only normalized IT Glue synchronization",
+                  "billing": { "deploymentPlan": "nf-compute-20", "buildPlan": "nf-compute-200-8" },
+                  "deployment": {
+                    "vcs": { "projectType": "github", "projectUrl": "https://github.com/adamcarbonell/Checklists", "projectBranch": "main" },
+                    "docker": { "configType": "customCommand", "customCommand": "node node_modules/tsx/dist/cli.mjs scripts/sync-itglue.ts" },
+                    "storage": { "ephemeralStorage": { "storageSize": 1024 } }
+                  },
+                  "buildSettings": { "dockerfile": { "buildEngine": "buildkit", "dockerFilePath": "/Dockerfile", "dockerWorkDir": "/" } },
+                  "schedule": "0 */6 * * *",
+                  "concurrencyPolicy": "forbid",
+                  "backoffLimit": 2,
+                  "activeDeadlineSeconds": 1800,
+                  "runOnSourceChange": "never",
+                  "suspended": false
+                }
+              },
+              {
+                "kind": "SecretGroup",
+                "ref": "runtime-secrets",
+                "spec": {
+                  "name": "checklists-runtime",
+                  "type": "secret",
+                  "secretType": "environment-arguments",
+                  "priority": 10,
+                  "secrets": { "variables": {}, "files": {} },
+                  "addonDependencies": [
+                    { "addonId": "${refs.database.id}", "keys": [{ "keyName": "POSTGRES_URI", "aliases": ["DATABASE_URL"] }] }
+                  ],
+                  "restrictions": { "restricted": false, "nfObjects": [], "tags": [] }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
