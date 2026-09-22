@@ -105,7 +105,7 @@
                   "billing": { "deploymentPlan": "nf-compute-20" },
                   "deployment": {
                     "vcs": { "projectType": "github", "projectUrl": "https://github.com/adamcarbonell/Checklists", "projectBranch": "main" },
-                    "docker": { "configType": "customCommand", "customCommand": "node node_modules/tsx/dist/cli.mjs scripts/migrate.ts && node node_modules/tsx/dist/cli.mjs scripts/seed.ts" },
+                    "docker": { "configType": "customCommand", "customCommand": "sh -c \"node node_modules/tsx/dist/cli.mjs scripts/migrate.ts && node node_modules/tsx/dist/cli.mjs scripts/seed.ts\"" },
                     "storage": { "ephemeralStorage": { "storageSize": 1024 } }
                   },
                   "buildSettings": { "dockerfile": { "buildEngine": "buildkit", "dockerFilePath": "/Dockerfile", "dockerWorkDir": "/" } },

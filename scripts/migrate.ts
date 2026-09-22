@@ -2,7 +2,7 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { closeDatabase, getDatabase } from "../src/db/client";
 
 async function main() {
-  await migrate(getDatabase(), { migrationsFolder: "drizzle" });
+  await migrate(getDatabase(), { migrationsFolder: "drizzle", migrationsSchema: "public" });
   console.log("Database migrations completed.");
 }
 
