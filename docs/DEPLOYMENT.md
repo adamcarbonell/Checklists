@@ -34,7 +34,7 @@ No credentials are stored in the repository or template. Disabling database back
 
 Auth.js verifies the Entra `tid` claim server-side. The bootstrap email is promoted only when first seen in the approved tenant; every other new tenant user starts as a viewer.
 
-The migration journal lives in PostgreSQL's `public` schema because Northflank's standard add-on connection can create tables there but cannot create a new schema. The migration job runs migration and seed commands sequentially through `sh -c`; do not replace this with a bare `&&` in Northflank's custom-command field, which treats it as an argument rather than a shell operator.
+The migration journal lives in PostgreSQL's `public` schema because Northflank's standard add-on connection can create tables there but cannot execute `CREATE SCHEMA`, even when the schema already exists. The migration runner uses Drizzle's migration files and journal format without that schema-creation statement. The migration job runs migration and seed commands sequentially through `sh -c`; do not replace this with a bare `&&` in Northflank's custom-command field, which treats it as an argument rather than a shell operator.
 
 ## Migration-first releases
 
