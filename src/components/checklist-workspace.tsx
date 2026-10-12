@@ -25,6 +25,7 @@ import {
   ActionMenu,
   HistoryDialog,
   Modal,
+  TextPrompt,
   RepeatControl,
   WorkspaceShell,
   api,
@@ -121,6 +122,8 @@ export function ChecklistWorkspace({
     [details, setDetails] = useState(false),
     [add, setAdd] = useState(false);
   const [dropHint, setDropHint] = useState("");
+  const [creatingTemplate, setCreatingTemplate] = useState(false);
+  const [insertingVariable, setInsertingVariable] = useState(false);
   const [library, setLibrary] = useState<LibraryStep[]>([]),
     [sourceChoice, setSourceChoice] = useState(""),
     [draftName, setDraftName] = useState(data?.templateName ?? ""),
@@ -364,11 +367,10 @@ export function ChecklistWorkspace({
         setHistory([{ type: "template_history", id: data.templateId }]),
       );
   }
-  async function createTemplate() {
-    const name = window.prompt("Template name");
-    if (!name?.trim()) return;
+  async function createTemplate(name: string) {
     await action(async () => {
       const result = await api("/api/templates", "POST", { name });
+      setCreatingTemplate(false);
       router.push(`/?templateId=${result.data.id}`);
     });
   }
@@ -428,7 +430,7 @@ export function ChecklistWorkspace({
         {canEdit && (
           <button
             className="rounded-xl border px-3 py-2 text-xs"
-            onClick={createTemplate}
+            onClick={() => setCreatingTemplate(true)}
           >
             New template
           </button>
@@ -887,22 +889,7 @@ export function ChecklistWorkspace({
                       value={selected.body}
                       editable={canEdit && !selected.sourceMissing}
                       onChange={(body) => updateStep({ body })}
-                      onInsertVariable={() => {
-                        const key = window.prompt(
-                          "Variable token",
-                          data.definitions[0]?.key ?? "org.ad_full_name",
-                        );
-                        if (key)
-                          updateStep({
-                            body: {
-                              ...selected.body,
-                              content: [
-                                ...(selected.body.content ?? []),
-                                ...doc(`{{${key}}}`).content,
-                              ],
-                            },
-                          });
-                      }}
+                      onInsertVariable={() => setInsertingVariable(true)}
                     />
                   </div>
                   <div>
@@ -955,6 +942,41 @@ export function ChecklistWorkspace({
             </aside>
           </div>
         </>
+      )}
+      {creatingTemplate && canEdit && (
+        <TextPrompt
+          title="New template"
+          label="Template name"
+          maxLength={160}
+          submitLabel="Create template"
+          errorMessage={error}
+          onClose={() => setCreatingTemplate(false)}
+          onSubmit={createTemplate}
+        />
+      )}
+      {insertingVariable && selected && data && canEdit && (
+        <TextPrompt
+          title="Insert variable"
+          label="Variable token"
+          submitLabel="Insert variable"
+          initialValue={data.definitions[0]?.key ?? "org.ad_full_name"}
+          suggestions={data.definitions
+            .filter((definition) => definition.enabled)
+            .map((definition) => definition.key)}
+          onClose={() => setInsertingVariable(false)}
+          onSubmit={(key) => {
+            updateStep({
+              body: {
+                ...selected.body,
+                content: [
+                  ...(selected.body.content ?? []),
+                  ...doc(`{{${key}}}`).content,
+                ],
+              },
+            });
+            setInsertingVariable(false);
+          }}
+        />
       )}
       {deletedList && (
         <Modal title="Deleted templates" onClose={() => setDeletedList(null)}>

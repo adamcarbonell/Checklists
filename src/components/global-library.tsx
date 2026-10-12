@@ -12,6 +12,7 @@ import {
   WorkspaceShell,
   ActionMenu,
   HistoryDialog,
+  TextPrompt,
   RepeatControl,
   api,
   doc,
@@ -56,6 +57,7 @@ export function GlobalLibrary({
     ),
     [busy, setBusy] = useState(false);
   const { state, queue } = useSaves();
+  const [insertingVariable, setInsertingVariable] = useState(false);
   const [gate] = useState(() => new MutationGate());
   const router = useRouter();
   const canEdit = user.role !== "viewer";
@@ -285,22 +287,7 @@ export function GlobalLibrary({
                   value={selected.body}
                   editable={canEdit && !selected.deletedAt}
                   onChange={(body) => update({ body })}
-                  onInsertVariable={() => {
-                    const key = window.prompt(
-                      "Variable token",
-                      definitions[0]?.key ?? "org.ad_full_name",
-                    );
-                    if (key)
-                      update({
-                        body: {
-                          ...selected.body,
-                          content: [
-                            ...(selected.body.content ?? []),
-                            ...doc(`{{${key}}}`).content,
-                          ],
-                        },
-                      });
-                  }}
+                  onInsertVariable={() => setInsertingVariable(true)}
                 />
               </div>
               <div className="mt-5">
@@ -343,6 +330,30 @@ export function GlobalLibrary({
           )}
         </section>
       </div>
+      {insertingVariable && selected && canEdit && !selected.deletedAt && (
+        <TextPrompt
+          title="Insert variable"
+          label="Variable token"
+          submitLabel="Insert variable"
+          initialValue={definitions[0]?.key ?? "org.ad_full_name"}
+          suggestions={definitions
+            .filter((definition) => definition.enabled)
+            .map((definition) => definition.key)}
+          onClose={() => setInsertingVariable(false)}
+          onSubmit={(key) => {
+            update({
+              body: {
+                ...selected.body,
+                content: [
+                  ...(selected.body.content ?? []),
+                  ...doc(`{{${key}}}`).content,
+                ],
+              },
+            });
+            setInsertingVariable(false);
+          }}
+        />
+      )}
       {history && (
         <HistoryDialog
           entities={history}

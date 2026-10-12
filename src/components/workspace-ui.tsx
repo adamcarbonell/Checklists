@@ -399,6 +399,96 @@ export function Modal({
     </dialog>
   );
 }
+export function TextPrompt({
+  title,
+  label,
+  initialValue = "",
+  submitLabel = "Save",
+  required = true,
+  maxLength = 200,
+  suggestions = [],
+  errorMessage = "",
+  onClose,
+  onSubmit,
+}: {
+  title: string;
+  label: string;
+  initialValue?: string;
+  submitLabel?: string;
+  required?: boolean;
+  maxLength?: number;
+  suggestions?: string[];
+  errorMessage?: string;
+  onClose: () => void;
+  onSubmit: (value: string) => void | Promise<void>;
+}) {
+  const [value, setValue] = useState(initialValue);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <Modal title={title} onClose={onClose}>
+      <form
+        className="space-y-4"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const text = value.trim();
+          if (saving || (required && !text)) return;
+          setSaving(true);
+          setError("");
+          try {
+            await onSubmit(text);
+          } catch {
+            setError("Unable to save. Please check the value and retry.");
+          } finally {
+            setSaving(false);
+          }
+        }}
+      >
+        <label className="block text-sm">
+          {label}
+          <input
+            autoFocus
+            required={required}
+            maxLength={maxLength}
+            value={value}
+            disabled={saving}
+            list={suggestions.length ? "prompt-suggestions" : undefined}
+            onChange={(event) => setValue(event.target.value)}
+            className="mt-2 w-full rounded-lg border p-3"
+          />
+        </label>
+        {suggestions.length > 0 && (
+          <datalist id="prompt-suggestions">
+            {suggestions.map((suggestion) => (
+              <option key={suggestion} value={suggestion} />
+            ))}
+          </datalist>
+        )}
+        {(error || errorMessage) && (
+          <p role="alert" className="text-sm text-red-700">
+            {error || errorMessage}
+          </p>
+        )}
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            disabled={saving}
+            onClick={onClose}
+            className="rounded-lg border px-4 py-2 text-sm"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={saving || (required && !value.trim())}
+            className="rounded-lg bg-teal-700 px-4 py-2 text-sm text-white disabled:opacity-50"
+          >
+            {saving ? "Saving…" : submitLabel}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
 export function RepeatControl({
   value,
   definitions,

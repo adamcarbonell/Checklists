@@ -4,7 +4,8 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import { Bold, Italic, List, ListOrdered, Link2, Variable } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { TextPrompt } from "./workspace-ui";
 import type { RichNode } from "@/lib/template-engine";
 
 export function RichTextEditor({
@@ -18,6 +19,8 @@ export function RichTextEditor({
   onInsertVariable: () => void;
   editable?: boolean;
 }) {
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [linkDraft, setLinkDraft] = useState("");
   const editor = useEditor({
     immediatelyRender: false,
     editable,
@@ -53,10 +56,8 @@ export function RichTextEditor({
     return <div className="h-40 animate-pulse rounded-xl bg-slate-50" />;
   const link = () => {
     const current = editor.getAttributes("link").href as string | undefined;
-    const href = window.prompt("Link URL", current ?? "https://");
-    if (href === null) return;
-    if (!href) editor.chain().focus().unsetLink().run();
-    else editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
+    setLinkDraft(current ?? "https://");
+    setLinkOpen(true);
   };
   return (
     <div className="overflow-hidden rounded-xl border border-[#d8e1dc] bg-white shadow-sm">
@@ -103,6 +104,30 @@ export function RichTextEditor({
         </div>
       )}
       <EditorContent editor={editor} />
+      {editable && linkOpen && (
+        <TextPrompt
+          title="Edit link"
+          label="Link URL"
+          initialValue={linkDraft}
+          required={false}
+          maxLength={2048}
+          onClose={() => setLinkOpen(false)}
+          onSubmit={(href) => {
+            if (href && !/^(https?:\/\/|mailto:)/i.test(href))
+              throw new Error("invalid_link");
+            if (!href)
+              editor.chain().focus().extendMarkRange("link").unsetLink().run();
+            else
+              editor
+                .chain()
+                .focus()
+                .extendMarkRange("link")
+                .setLink({ href })
+                .run();
+            setLinkOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }

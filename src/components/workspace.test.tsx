@@ -34,27 +34,32 @@ vi.mock("./rich-text-editor", () => ({
     value,
     onChange,
     editable,
+    onInsertVariable,
   }: {
     value: { content?: { content?: { text?: string }[] }[] };
     onChange: (v: unknown) => void;
     editable: boolean;
+    onInsertVariable: () => void;
   }) => (
-    <textarea
-      aria-label="Instructions"
-      disabled={!editable}
-      value={value.content?.[0]?.content?.[0]?.text ?? ""}
-      onChange={(e) =>
-        onChange({
-          type: "doc",
-          content: [
-            {
-              type: "paragraph",
-              content: [{ type: "text", text: e.target.value }],
-            },
-          ],
-        })
-      }
-    />
+    <>
+      <textarea
+        aria-label="Instructions"
+        disabled={!editable}
+        value={value.content?.[0]?.content?.[0]?.text ?? ""}
+        onChange={(e) =>
+          onChange({
+            type: "doc",
+            content: [
+              {
+                type: "paragraph",
+                content: [{ type: "text", text: e.target.value }],
+              },
+            ],
+          })
+        }
+      />
+      {editable && <button onClick={onInsertVariable}>Variable</button>}
+    </>
   ),
 }));
 import { ChecklistWorkspace } from "./checklist-workspace";
@@ -171,11 +176,14 @@ beforeEach(() => {
         });
         return new Response(
           JSON.stringify({
-            data: url.includes("context?")
-              ? context
-              : url.includes("workspace")
-                ? data
-                : [],
+            data:
+              url === "/api/templates" && options.method === "POST"
+                ? { id: "created-template" }
+                : url.includes("context?")
+                  ? context
+                  : url.includes("workspace")
+                    ? data
+                    : [],
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
@@ -188,6 +196,63 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("workspace controls", () => {
+  it("creates templates using an in-page form without browser prompt support", async () => {
+    const prompt = vi.spyOn(window, "prompt").mockImplementation(() => {
+      throw new Error("prompt unavailable");
+    });
+    try {
+      render(<ChecklistWorkspace initialData={data} user={user} />);
+      fireEvent.click(screen.getByRole("button", { name: "New template" }));
+      expect(
+        await screen.findByRole("dialog", { name: "New template" }),
+      ).toBeTruthy();
+      expect(
+        (
+          screen.getByRole("button", {
+            name: "Create template",
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(requests.some((request) => request.method === "POST")).toBe(false);
+      fireEvent.click(screen.getByRole("button", { name: "New template" }));
+      fireEvent.change(screen.getByLabelText("Template name"), {
+        target: { value: "New checklist" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Create template" }));
+      await waitFor(() =>
+        expect(mocks.push).toHaveBeenCalledWith(
+          "/?templateId=created-template",
+        ),
+      );
+      expect(
+        requests.find((request) => request.url === "/api/templates")?.body,
+      ).toEqual({ name: "New checklist" });
+      expect(prompt).not.toHaveBeenCalled();
+    } finally {
+      prompt.mockRestore();
+    }
+  });
+  it("inserts variable tokens from an in-page form and saves the step", async () => {
+    render(<ChecklistWorkspace initialData={data} user={user} />);
+    fireEvent.click(screen.getByRole("button", { name: "Variable" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Insert variable" }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Insert variable" }));
+    await waitFor(
+      () =>
+        expect(requests.some((request) => request.method === "PATCH")).toBe(
+          true,
+        ),
+      { timeout: 2000 },
+    );
+    expect(
+      JSON.stringify(
+        requests.find((request) => request.method === "PATCH")?.body,
+      ),
+    ).toContain("{{org.applications}}");
+  });
   it("switches diagnostic tabs and organization-specific snapshots", async () => {
     render(<ChecklistWorkspace initialData={data} user={user} />);
     await waitFor(() =>
