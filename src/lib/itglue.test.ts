@@ -4,6 +4,27 @@ import { ItGlueClient, ItGlueLimitError, ItGlueMalformedError } from "./itglue";
 const selectedFields = [{ sourceKey: "ad-full-name", alias: "value", expectedKind: "Text" }];
 
 describe("IT Glue client safety", () => {
+  it("validates flexible asset schema from included name-key fields without retaining other metadata", async () => {
+    const preview = vi.fn(async () => undefined);
+    const fetcher = vi.fn(async (url: URL | RequestInfo) => {
+      expect(new URL(String(url)).searchParams.get("include")).toBe("flexible_asset_fields");
+      return new Response(JSON.stringify({
+        data: { id: "107504", type: "flexible-asset-types", attributes: { name: "Active Directory" }, relationships: { "flexible-asset-fields": { data: [{ id: "42", type: "flexible-asset-fields" }] } } },
+        included: [{ id: "42", type: "flexible-asset-fields", attributes: { "name-key": "ad-full-name", name: "AD Full Name", kind: "Text", hint: "discard-me" } }],
+      }), { status: 200 });
+    });
+    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: preview, fetcher });
+    const result = await client.getFlexibleAssetType("107504");
+    expect(preview).toHaveBeenCalledWith(expect.objectContaining({ method: "GET", endpoint: "/flexible_asset_types", filters: { id: "107504" }, includes: ["flexible_asset_fields"], projectedFields: ["id", "name", "fields.name-key", "fields.kind"], possibleSideEffects: "none-read-only" }));
+    expect(result).toEqual({ id: "107504", name: "Active Directory", fields: [{ key: "ad-full-name", name: "AD Full Name", kind: "Text" }] });
+    expect(JSON.stringify(result)).not.toContain("discard-me");
+  });
+
+  it("rejects flexible asset schemas with missing included field data", async () => {
+    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: async () => undefined, fetcher: async () => new Response(JSON.stringify({ data: { id: "107504", attributes: { name: "Active Directory" }, relationships: { "flexible-asset-fields": { data: [{ id: "42" }] } } } }), { status: 200 }) });
+    await expect(client.getFlexibleAssetType("107504")).rejects.toBeInstanceOf(ItGlueMalformedError);
+  });
+
   it("previews a narrow read-only request and discards unselected traits", async () => {
     const preview = vi.fn(async () => undefined);
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "1", attributes: { name: "AD", traits: { "ad-full-name": "acme.local", password: "discard-me" } } }], meta: { "total-count": 1 } }), { status: 200 }));

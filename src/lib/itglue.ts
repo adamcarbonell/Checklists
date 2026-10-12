@@ -8,6 +8,7 @@ export type RequestPreview = {
   method: "GET";
   endpoint: "/flexible_assets" | "/flexible_asset_types" | "/organizations";
   filters: Record<string, string>;
+  includes?: string[];
   projectedFields: string[];
   resultLimit: number;
   dataSensitivity: "tenant-schema" | "organization-metadata" | "organization-documentation";
@@ -21,8 +22,8 @@ export type ItGlueClientOptions = {
   fetcher?: typeof fetch;
 };
 
-type JsonApiResource = { id: string; attributes?: Record<string, unknown> };
-type JsonApiResponse = { data?: JsonApiResource[]; meta?: Record<string, unknown>; links?: Record<string, unknown> };
+type JsonApiResource = { id: string; type?: string; attributes?: Record<string, unknown>; relationships?: Record<string, unknown> };
+type JsonApiResponse = { data?: JsonApiResource | JsonApiResource[]; included?: JsonApiResource[]; meta?: Record<string, unknown>; links?: Record<string, unknown> };
 
 export class ItGlueClient {
   private readonly apiKey: string;
@@ -77,20 +78,27 @@ export class ItGlueClient {
   }
 
   async getFlexibleAssetType(id: string) {
-    await this.onRequestPreview({ method: "GET", endpoint: "/flexible_asset_types", filters: { id }, projectedFields: ["id", "name", "fields.key", "fields.kind"], resultLimit: 1, dataSensitivity: "tenant-schema", possibleSideEffects: "none-read-only" });
-    const payload = await this.request(new URL(`${this.baseUrl}/flexible_asset_types/${encodeURIComponent(id)}`));
-    const resource = Array.isArray(payload.data) ? payload.data[0] : (payload.data as unknown as JsonApiResource | undefined);
-    if (!resource) throw new Error("Flexible asset type was not found.");
-    const attributes = resource.attributes ?? {};
-    const rawFields = Array.isArray(attributes["flexible-asset-fields"]) ? attributes["flexible-asset-fields"] : [];
-    const fields = rawFields.flatMap((entry) => {
-      if (!isObject(entry)) return [];
-      const fieldAttributes = isObject(entry.attributes) ? entry.attributes : entry;
-      const key = String(fieldAttributes.key ?? fieldAttributes["api-key"] ?? fieldAttributes.name ?? "");
-      const kind = String(fieldAttributes.kind ?? fieldAttributes.type ?? "");
-      return key ? [{ key, name: String(fieldAttributes.name ?? key), kind }] : [];
-    }).slice(0, 1000);
-    return { id: resource.id, name: String(attributes.name ?? ""), fields };
+    await this.onRequestPreview({ method: "GET", endpoint: "/flexible_asset_types", filters: { id }, includes: ["flexible_asset_fields"], projectedFields: ["id", "name", "fields.name-key", "fields.kind"], resultLimit: MAX_RECORDS, dataSensitivity: "tenant-schema", possibleSideEffects: "none-read-only" });
+    const url = new URL(`${this.baseUrl}/flexible_asset_types/${encodeURIComponent(id)}`);
+    url.searchParams.set("include", "flexible_asset_fields");
+    const payload = await this.request(url);
+    const resource = !Array.isArray(payload.data) && isObject(payload.data) ? payload.data : undefined;
+    if (!resource || String(resource.id) !== id) throw new ItGlueMalformedError("flexible_asset_type_missing_or_mismatched");
+    const relation = resource.relationships?.["flexible-asset-fields"];
+    const linkedFields = isObject(relation) ? relation.data : undefined;
+    if (!Array.isArray(linkedFields)) throw new ItGlueMalformedError("flexible_asset_fields_relationship_missing");
+    if (linkedFields.length > MAX_RECORDS || (payload.included?.length ?? 0) > MAX_RECORDS) throw new ItGlueLimitError(Math.max(linkedFields.length, payload.included?.length ?? 0));
+    if (linkedFields.length && !Array.isArray(payload.included)) throw new ItGlueMalformedError("flexible_asset_fields_included_missing");
+    const included = new Map((payload.included ?? []).filter((field) => field.type === "flexible-asset-fields").map((field) => [String(field.id), field]));
+    const fields = linkedFields.map((link) => {
+      const field = isObject(link) ? included.get(String(link.id ?? "")) : undefined;
+      const attributes = field?.attributes;
+      const key = attributes?.["name-key"];
+      const kind = attributes?.kind;
+      if (typeof key !== "string" || !key || typeof kind !== "string" || !kind) throw new ItGlueMalformedError("flexible_asset_field_missing_key_or_kind");
+      return { key, name: typeof attributes.name === "string" ? attributes.name : key, kind };
+    });
+    return { id: String(resource.id), name: String(resource.attributes?.name ?? ""), fields };
   }
 
   private async request(url: URL): Promise<JsonApiResponse> {
