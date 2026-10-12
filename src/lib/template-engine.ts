@@ -21,7 +21,7 @@ export type OrganizationTemplateItem = {
   kind: "organization";
   organizationId: string;
   anchorItemId: string | null;
-  placement: "before" | "after" | null;
+  placement: "start" | "end" | "before" | "after" | null;
   position: number;
   title: string;
   body: RichNode;
@@ -36,6 +36,8 @@ export type RenderIssue = {
     | "missing_anchor"
     | "missing_variable"
     | "invalid_list"
+    | "too_many_steps"
+    | "empty_checklist"
     | "missing_source";
   itemId: string;
   variableKey?: string;
@@ -82,8 +84,14 @@ export function mergeTemplateItems(
   const issues: RenderIssue[] = [];
   const before = new Map<string, OrganizationTemplateItem[]>();
   const after = new Map<string, OrganizationTemplateItem[]>();
+  const start: OrganizationTemplateItem[] = [],
+    end: OrganizationTemplateItem[] = [];
 
   for (const item of orgItems) {
+    if (item.placement === "start" || item.placement === "end") {
+      (item.placement === "start" ? start : end).push(item);
+      continue;
+    }
     if (
       !item.anchorItemId ||
       !globalIds.has(item.anchorItemId) ||
@@ -99,7 +107,9 @@ export function mergeTemplateItems(
     ]);
   }
 
-  const merged: TemplateItem[] = [];
+  const merged: TemplateItem[] = [
+    ...start.sort((a, b) => a.position - b.position),
+  ];
   for (const item of globals) {
     merged.push(
       ...(before.get(item.id) ?? []).sort((a, b) => a.position - b.position),
@@ -107,6 +117,7 @@ export function mergeTemplateItems(
       ...(after.get(item.id) ?? []).sort((a, b) => a.position - b.position),
     );
   }
+  merged.push(...end.sort((a, b) => a.position - b.position));
   return { items: merged, issues };
 }
 
@@ -131,7 +142,11 @@ export function renderTemplate(
         });
         continue;
       }
-      records.forEach((record, index) => {
+      for (const [index, record] of records.entries()) {
+        if (steps.length >= 1000) {
+          issues.push({ code: "too_many_steps", itemId: item.id });
+          break;
+        }
         const repeated = isObject(record) ? record : { value: record };
         for (const key of new Set([
           ...extractVariableKeys(item.title),
@@ -144,8 +159,12 @@ export function renderTemplate(
               variableKey: key,
             });
         steps.push(renderStep(item, values, repeated, index));
-      });
+      }
     } else {
+      if (steps.length >= 1000) {
+        issues.push({ code: "too_many_steps", itemId: item.id });
+        break;
+      }
       const missing = [
         ...extractVariableKeys(item.title),
         ...extractVariableKeys(item.body),

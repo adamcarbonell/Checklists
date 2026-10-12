@@ -1,7 +1,11 @@
 import { and, asc, eq, isNull } from "drizzle-orm";
-import { getDatabase, hasDatabase } from "@/db/client";
 import {
-  globalSteps,
+  getDatabase,
+  hasDatabase,
+  type Database,
+  type DatabaseTransaction,
+} from "@/db/client";
+import {
   organizations,
   organizationVariableValues,
   templateItems,
@@ -19,308 +23,56 @@ import type {
   WorkspaceStep,
   TemplateContext,
   ContextVariable,
+  TemplateSummary,
 } from "./workspace-types";
-
-export async function loadWorkspace(
-  templateId?: string,
-): Promise<WorkspaceData | null> {
-  if (!hasDatabase()) return null;
-  const db = getDatabase();
-  const templateList = await db
-    .select({ id: templates.id, name: templates.name })
-    .from(templates)
-    .where(isNull(templates.deletedAt))
-    .orderBy(asc(templates.name));
-  const wanted = templateId ?? templateList[0]?.id;
-  if (!wanted) return null;
-  const [template] = await db
-    .select()
-    .from(templates)
-    .where(and(eq(templates.id, wanted), isNull(templates.deletedAt)))
-    .limit(1);
-  if (!template) return null;
-  const [orgs, rows, globals, definitions] = await Promise.all([
-    db
-      .select({ id: organizations.id, name: organizations.name })
-      .from(organizations)
-      .where(
-        and(eq(organizations.enabled, true), isNull(organizations.deletedAt)),
-      )
-      .orderBy(asc(organizations.name))
-      .limit(1000),
-    db
-      .select()
-      .from(templateItems)
-      .where(
-        and(
-          eq(templateItems.templateId, template.id),
-          isNull(templateItems.deletedAt),
-        ),
-      )
-      .orderBy(asc(templateItems.position)),
-    db.select().from(globalSteps).where(isNull(globalSteps.deletedAt)),
-    db
-      .select({
-        id: variableDefinitions.id,
-        key: variableDefinitions.key,
-        label: variableDefinitions.label,
-        cardinality: variableDefinitions.cardinality,
-        schemaValid: variableDefinitions.schemaValid,
-        enabled: variableDefinitions.enabled,
-      })
-      .from(variableDefinitions)
-      .where(isNull(variableDefinitions.deletedAt))
-      .orderBy(asc(variableDefinitions.key)),
-  ]);
-  const globalMap = new Map(globals.map((s) => [s.id, s]));
-  const repeatMap = new Map(definitions.map((d) => [d.id, d.key]));
-  const steps: WorkspaceStep[] = rows.map((row) => {
-    const source = row.globalStepId
-      ? globalMap.get(row.globalStepId)
-      : undefined;
-    const repeatVariableId =
-      row.kind === "global"
-        ? (source?.repeatVariableId ?? null)
-        : row.snapshotRepeatVariableId;
-    return {
-      id: row.id,
-      sourceId: row.globalStepId ?? row.sourceOrganizationStepId,
-      title:
-        row.kind === "global"
-          ? (source?.title ?? "Unavailable global step")
-          : (row.snapshotTitle ?? "Untitled organization step"),
-      body: ((row.kind === "global"
-        ? source?.body
-        : row.snapshotBody) as RichNode) ?? { type: "doc", content: [] },
-      kind: row.kind === "global" ? "global" : "org",
-      position: row.position,
-      organizationId: row.organizationId,
-      anchorItemId: row.anchorItemId,
-      placement: row.placement,
-      repeatVariableId,
-      repeat: repeatVariableId ? repeatMap.get(repeatVariableId) : undefined,
-      sourceMissing: row.kind === "global" && !source,
-    };
-  });
-  return {
-    templateId: template.id,
-    templateName: template.name,
-    templateDescription: template.description ?? "",
-    steps,
-    organizations: orgs,
-    definitions,
-    templates: templateList,
-    globalCount: globals.length,
-  };
+type Reader = Database | DatabaseTransaction;
+export async function loadOrganizations(db: Reader = getDatabase()) {
+  return db
+    .select({ id: organizations.id, name: organizations.name })
+    .from(organizations)
+    .where(
+      and(eq(organizations.enabled, true), isNull(organizations.deletedAt)),
+    )
+    .orderBy(asc(organizations.name))
+    .limit(1000);
 }
-
-export async function loadTemplateContext(
-  templateId: string,
-  organizationId: string,
-): Promise<TemplateContext | null> {
-  const workspace = await loadWorkspace(templateId);
-  if (
-    !workspace ||
-    !workspace.organizations.some((o) => o.id === organizationId)
-  )
-    return null;
-  const stored = await getDatabase()
-    .select()
-    .from(organizationVariableValues)
-    .where(eq(organizationVariableValues.organizationId, organizationId));
-  const byDefinition = new Map(stored.map((v) => [v.definitionId, v]));
-  const approvedFields = await getDatabase()
+export async function loadTemplates(
+  filters: {
+    scope?: "global" | "organization";
+    organizationId?: string;
+    includeDeleted?: boolean;
+  } = {},
+  db: Reader = getDatabase(),
+): Promise<TemplateSummary[]> {
+  const rows = await db
     .select({
-      id: variableDefinitions.id,
-      fields: variableDefinitions.selectedFields,
+      id: templates.id,
+      name: templates.name,
+      scope: templates.scope,
+      organizationId: templates.organizationId,
+      globalTemplateId: templates.globalTemplateId,
+      version: templates.version,
+      deletedAt: templates.deletedAt,
     })
-    .from(variableDefinitions)
-    .where(isNull(variableDefinitions.deletedAt));
-  const fieldMap = new Map(
-    approvedFields.map((d) => [d.id, d.fields.map((f) => f.alias)]),
-  );
-  const applicable = workspace.steps.filter(
-    (s) => s.kind === "global" || s.organizationId === organizationId,
-  );
-  const usedKeys = new Set(
-    applicable
-      .flatMap((s) => [
-        ...extractVariableKeys(s.title),
-        ...extractVariableKeys(s.body),
-        ...(s.repeat ? [s.repeat] : []),
-      ])
-      .filter((k) => !k.startsWith("item.")),
-  );
-  const variables: ContextVariable[] = workspace.definitions.map((d) => {
-    const row = byDefinition.get(d.id);
-    const stale =
-      !!row?.syncedAt && Date.now() - row.syncedAt.getTime() > 86400000;
-    const overLimit = Array.isArray(row?.value) && row.value.length > 1000;
-    const malformedList =
-      d.cardinality === "list" &&
-      row?.value != null &&
-      (!Array.isArray(row.value) ||
-        row.value.some(
-          (item) => !item || typeof item !== "object" || Array.isArray(item),
-        ));
-    const status =
-      !d.enabled || !d.schemaValid || overLimit || malformedList
-        ? "invalid"
-        : stale
-          ? "stale"
-          : !row?.syncedAt
-            ? "pending"
-            : (row?.status ?? "pending");
-    return {
-      ...d,
-      value: projectValue(
-        overLimit || malformedList ? null : (row?.value ?? null),
-        d.cardinality,
-        fieldMap.get(d.id) ?? [],
+    .from(templates)
+    .where(
+      and(
+        filters.scope ? eq(templates.scope, filters.scope) : undefined,
+        filters.organizationId
+          ? eq(templates.organizationId, filters.organizationId)
+          : undefined,
+        filters.includeDeleted ? undefined : isNull(templates.deletedAt),
       ),
-      status,
-      issues: [
-        ...(row?.issues ?? []),
-        ...(!d.enabled ? ["definition_disabled"] : []),
-        ...(!d.schemaValid ? ["schema_incompatible"] : []),
-        ...(stale ? ["last_refresh_over_24_hours"] : []),
-        ...(overLimit ? ["record_limit_exceeded"] : []),
-        ...(malformedList ? ["malformed_normalized_list"] : []),
-      ],
-      syncedAt: row?.syncedAt?.toISOString() ?? null,
-      used: usedKeys.has(d.key),
-    };
-  });
-  const values: Record<string, unknown> = {};
-  for (const variable of variables)
-    setPath(values, variable.key, variable.value);
-  const items: TemplateItem[] = applicable.map((s) =>
-    s.kind === "global"
-      ? {
-          id: s.id,
-          kind: "global",
-          position: s.position,
-          title: s.title,
-          body: s.body,
-          repeatVariableKey: s.repeat,
-        }
-      : {
-          id: s.id,
-          kind: "organization",
-          organizationId: s.organizationId!,
-          position: s.position,
-          anchorItemId: s.anchorItemId,
-          placement: s.placement,
-          title: s.title,
-          body: s.body,
-          repeatVariableKey: s.repeat,
-        },
-  );
-  const rendered = renderTemplate(items, organizationId, values);
-  const invalidVariables = [
-    ...new Set([
-      ...variables
-        .filter((v) => v.used && v.status !== "valid")
-        .map((v) => v.key),
-      ...Array.from(usedKeys).filter(
-        (k) => !variables.some((v) => v.key === k),
-      ),
-    ]),
-  ];
-  const issues = [
-    ...rendered.issues,
-    ...applicable
-      .filter((s) => s.sourceMissing)
-      .map((s) => ({ code: "missing_source" as const, itemId: s.id })),
-    ...applicable
-      .filter(
-        (s) =>
-          s.repeatVariableId &&
-          !workspace.definitions.some(
-            (d) =>
-              d.id === s.repeatVariableId &&
-              d.enabled &&
-              d.cardinality === "list",
-          ),
-      )
-      .map((s) => ({
-        code: "invalid_list" as const,
-        itemId: s.id,
-        variableKey: s.repeat,
-      })),
-  ];
-  return {
-    organizationId,
-    variables,
-    issues,
-    invalidVariables,
-    valid: issues.length === 0 && invalidVariables.length === 0,
-    steps: rendered.steps,
-  };
-}
-
-function setPath(root: Record<string, unknown>, path: string, value: unknown) {
-  const parts = path.split(".");
-  let current = root;
-  parts.forEach((part, i) => {
-    if (i === parts.length - 1) current[part] = value;
-    else {
-      if (!current[part] || typeof current[part] !== "object")
-        current[part] = {};
-      current = current[part] as Record<string, unknown>;
-    }
-  });
-}
-
-function projectValue(
-  value: unknown,
-  cardinality: "scalar" | "list",
-  aliases: string[],
-): unknown {
-  const project = (row: unknown) => {
-    if (!row || typeof row !== "object" || Array.isArray(row)) return row;
-    return Object.fromEntries(
-      Object.entries(row).filter(
-        ([key]) => aliases.includes(key) || key === "id",
-      ),
-    );
-  };
-  return cardinality === "list" && Array.isArray(value)
-    ? value.map(project)
-    : project(value);
-}
-
-export async function loadLibrary() {
-  const db = getDatabase();
-  const [steps, links] = await Promise.all([
-    db.select().from(globalSteps).orderBy(asc(globalSteps.title)),
-    db
-      .select({
-        stepId: templateItems.globalStepId,
-        id: templates.id,
-        name: templates.name,
-      })
-      .from(templateItems)
-      .innerJoin(templates, eq(templates.id, templateItems.templateId))
-      .where(and(isNull(templateItems.deletedAt), isNull(templates.deletedAt))),
-  ]);
-  return steps.map((s) => ({
-    id: s.id,
-    title: s.title,
-    body: s.body as RichNode,
-    repeatVariableId: s.repeatVariableId,
-    deletedAt: s.deletedAt?.toISOString() ?? null,
-    references: Array.from(
-      new Map(
-        links
-          .filter((l) => l.stepId === s.id)
-          .map((l) => [l.id, { id: l.id, name: l.name }]),
-      ).values(),
-    ),
+    )
+    .orderBy(asc(templates.name))
+    .limit(1000);
+  return rows.map((row) => ({
+    ...row,
+    deletedAt: row.deletedAt?.toISOString() ?? null,
   }));
 }
-export async function loadDefinitions() {
-  return getDatabase()
+export async function loadDefinitions(db: Reader = getDatabase()) {
+  return db
     .select({
       id: variableDefinitions.id,
       key: variableDefinitions.key,
@@ -331,5 +83,280 @@ export async function loadDefinitions() {
     })
     .from(variableDefinitions)
     .where(isNull(variableDefinitions.deletedAt))
-    .orderBy(asc(variableDefinitions.key));
+    .orderBy(asc(variableDefinitions.key))
+    .limit(1000);
+}
+export async function loadWorkspace(
+  templateId: string,
+  db: Reader = getDatabase(),
+): Promise<WorkspaceData | null> {
+  if (!hasDatabase()) return null;
+  const [template] = await db
+    .select()
+    .from(templates)
+    .where(and(eq(templates.id, templateId), isNull(templates.deletedAt)))
+    .limit(1);
+  if (!template) return null;
+  const orgs = await loadOrganizations(db);
+  const organization = orgs.find((org) => org.id === template.organizationId);
+  if (template.scope === "organization" && !organization) return null;
+  let parent: typeof templates.$inferSelect | undefined;
+  if (template.globalTemplateId) {
+    [parent] = await db
+      .select()
+      .from(templates)
+      .where(
+        and(
+          eq(templates.id, template.globalTemplateId),
+          eq(templates.scope, "global"),
+          isNull(templates.deletedAt),
+        ),
+      )
+      .limit(1);
+    if (!parent) return null;
+  }
+  const definitions = await loadDefinitions(db);
+  const rows = await db
+    .select()
+    .from(templateItems)
+    .where(
+      and(
+        eq(templateItems.templateId, template.id),
+        isNull(templateItems.deletedAt),
+      ),
+    )
+    .orderBy(asc(templateItems.position));
+  const inherited = parent
+    ? await db
+        .select()
+        .from(templateItems)
+        .where(
+          and(
+            eq(templateItems.templateId, parent.id),
+            isNull(templateItems.deletedAt),
+          ),
+        )
+        .orderBy(asc(templateItems.position))
+    : [];
+  const steps: WorkspaceStep[] = [...inherited, ...rows].map((row) => ({
+    id: row.id,
+    templateId: row.templateId,
+    title: row.title,
+    body: row.body as RichNode,
+    kind:
+      row.templateId === template.id && template.scope === "organization"
+        ? "org"
+        : "global",
+    inherited: row.templateId !== template.id,
+    position: row.position,
+    organizationId:
+      row.templateId === template.id ? template.organizationId : null,
+    anchorItemId: row.anchorItemId,
+    placement: row.placement,
+    repeatVariableId: row.repeatVariableId,
+    repeat: definitions.find(
+      (definition) => definition.id === row.repeatVariableId,
+    )?.key,
+    version: row.version,
+  }));
+  return {
+    templateId: template.id,
+    templateName: template.name,
+    templateDescription: template.description ?? "",
+    scope: template.scope,
+    organizationId: template.organizationId,
+    organizationName: organization?.name ?? null,
+    parent: parent
+      ? { id: parent.id, name: parent.name, version: parent.version }
+      : null,
+    version: template.version,
+    steps,
+    organizations: orgs,
+    definitions,
+  };
+}
+export async function loadTemplateContext(
+  templateId: string,
+  organizationId: string,
+  db: Reader = getDatabase(),
+): Promise<TemplateContext | null> {
+  const workspace = await loadWorkspace(templateId, db);
+  if (
+    !workspace ||
+    !workspace.organizations.some((org) => org.id === organizationId) ||
+    (workspace.scope === "organization" &&
+      workspace.organizationId !== organizationId)
+  )
+    return null;
+  const stored = await db
+    .select()
+    .from(organizationVariableValues)
+    .where(eq(organizationVariableValues.organizationId, organizationId));
+  const byDefinition = new Map(stored.map((row) => [row.definitionId, row]));
+  const approved = await db
+    .select({
+      id: variableDefinitions.id,
+      fields: variableDefinitions.selectedFields,
+    })
+    .from(variableDefinitions)
+    .where(isNull(variableDefinitions.deletedAt));
+  const fields = new Map(
+    approved.map((definition) => [
+      definition.id,
+      definition.fields.map((field) => field.alias),
+    ]),
+  );
+  const usedKeys = new Set(
+    workspace.steps
+      .flatMap((step) => [
+        ...extractVariableKeys(step.title),
+        ...extractVariableKeys(step.body),
+        ...(step.repeat ? [step.repeat] : []),
+      ])
+      .filter((key) => !key.startsWith("item.")),
+  );
+  const variables: ContextVariable[] = workspace.definitions.map(
+    (definition) => {
+      const row = byDefinition.get(definition.id),
+        stale =
+          !!row?.syncedAt && Date.now() - row.syncedAt.getTime() > 86400000;
+      const overLimit = Array.isArray(row?.value) && row.value.length > 1000;
+      const malformed =
+        definition.cardinality === "list" &&
+        row?.value != null &&
+        (!Array.isArray(row.value) ||
+          row.value.some(
+            (item) => !item || typeof item !== "object" || Array.isArray(item),
+          ));
+      return {
+        ...definition,
+        value:
+          overLimit || malformed
+            ? null
+            : projectValue(
+                row?.value ?? null,
+                definition.cardinality,
+                fields.get(definition.id) ?? [],
+              ),
+        status:
+          !definition.enabled ||
+          !definition.schemaValid ||
+          overLimit ||
+          malformed
+            ? "invalid"
+            : stale
+              ? "stale"
+              : !row?.syncedAt
+                ? "pending"
+                : row.status,
+        issues: [
+          ...(row?.issues ?? []),
+          ...(!definition.enabled ? ["definition_disabled"] : []),
+          ...(!definition.schemaValid ? ["schema_incompatible"] : []),
+          ...(stale ? ["last_refresh_over_24_hours"] : []),
+          ...(overLimit ? ["record_limit_exceeded"] : []),
+          ...(malformed ? ["malformed_normalized_list"] : []),
+        ],
+        syncedAt: row?.syncedAt?.toISOString() ?? null,
+        used: usedKeys.has(definition.key),
+      };
+    },
+  );
+  const values: Record<string, unknown> = {};
+  for (const variable of variables)
+    setPath(values, variable.key, variable.value);
+  const items: TemplateItem[] = workspace.steps.map((step) =>
+    step.kind === "global"
+      ? {
+          id: step.id,
+          kind: "global",
+          position: step.position,
+          title: step.title,
+          body: step.body,
+          repeatVariableKey: step.repeat,
+        }
+      : {
+          id: step.id,
+          kind: "organization",
+          organizationId,
+          position: step.position,
+          title: step.title,
+          body: step.body,
+          repeatVariableKey: step.repeat,
+          anchorItemId: step.anchorItemId,
+          placement: step.placement,
+        },
+  );
+  const rendered = renderTemplate(items, organizationId, values);
+  const invalidVariables = [
+    ...new Set([
+      ...variables
+        .filter((variable) => variable.used && variable.status !== "valid")
+        .map((variable) => variable.key),
+      ...Array.from(usedKeys).filter(
+        (key) => !variables.some((variable) => variable.key === key),
+      ),
+    ]),
+  ];
+  const issues = [
+    ...rendered.issues,
+    ...(!rendered.steps.length
+      ? [{ code: "empty_checklist" as const, itemId: templateId }]
+      : []),
+    ...workspace.steps
+      .filter(
+        (step) =>
+          step.repeatVariableId &&
+          !workspace.definitions.some(
+            (definition) =>
+              definition.id === step.repeatVariableId &&
+              definition.enabled &&
+              definition.cardinality === "list",
+          ),
+      )
+      .map((step) => ({
+        code: "invalid_list" as const,
+        itemId: step.id,
+        variableKey: step.repeat,
+      })),
+  ];
+  return {
+    organizationId,
+    variables,
+    issues,
+    invalidVariables,
+    valid: issues.length === 0 && invalidVariables.length === 0,
+    steps: rendered.steps,
+    templateVersion: workspace.version,
+    parentVersion: workspace.parent?.version ?? null,
+  };
+}
+function setPath(root: Record<string, unknown>, path: string, value: unknown) {
+  const parts = path.split(".");
+  let current = root;
+  parts.forEach((part, index) => {
+    if (index === parts.length - 1) current[part] = value;
+    else {
+      if (!current[part] || typeof current[part] !== "object")
+        current[part] = {};
+      current = current[part] as Record<string, unknown>;
+    }
+  });
+}
+function projectValue(
+  value: unknown,
+  cardinality: "scalar" | "list",
+  aliases: string[],
+): unknown {
+  const project = (row: unknown) =>
+    !row || typeof row !== "object" || Array.isArray(row)
+      ? row
+      : Object.fromEntries(
+          Object.entries(row).filter(
+            ([key]) => aliases.includes(key) || key === "id",
+          ),
+        );
+  return cardinality === "list" && Array.isArray(value)
+    ? value.map(project)
+    : project(value);
 }

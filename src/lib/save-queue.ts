@@ -49,4 +49,10 @@ export class SaveQueue {
   dispose() {
     clearTimeout(this.timer);
   }
+  discard() {
+    if (this.running) throw new Error("Cannot discard an in-flight save");
+    clearTimeout(this.timer);
+    this.pending.clear();
+    this.onState("saved");
+  }
 }

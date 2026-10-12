@@ -1,19 +1,46 @@
-# Architecture and security notes
+# Architecture and security
 
-Template entries are deliberately polymorphic:
+## Ownership and inheritance
 
-- A global entry stores the global step ID. Rendering always loads its current title, rich body, and repeat setting, so library changes propagate immediately.
-- An organization entry stores copied title/body/repeat values plus its source organization-step ID. Later library edits cannot mutate existing template snapshots.
-- Organization entries point to a global template-entry ID and `before`/`after` placement. A missing global anchor is a validation error and the snapshot is not silently relocated.
+`templates.scope` distinguishes global and organization templates. Global templates own standard `template_items`. Organization templates have a fixed organization and global-parent link, and own only local items. Steps have no reusable library source.
 
-Rich text is stored as constrained TipTap JSON. Server input drops unknown nodes and marks, restricts heading levels, caps depth and collection sizes, and keeps only `http`, `https`, and `mailto` links with safe relationship attributes.
+An organization template loads its active parent items live. Inherited instructions, repetition, and ordering are read-only in the child API and editor. Local items use start/end placement or before/after placement anchored to a stable parent item ID. Parent reordering carries anchored additions. Soft-deleting a parent item retains local anchors; missing anchors remain visible and block new checklist creation. A global template with active child links cannot be deleted.
 
-Autosave writes are debounced in the editor. Revisions coalesce changes occurring within a 30-second checkpoint window; restoration first records the current state and then applies the historical snapshot, making restore itself reversible.
+Metadata, item, and ordering mutations lock the parent before the child to provide a consistent lock order. Expected versions and complete expected/proposed order membership prevent lost updates. Organization ordering writes only that child's owned items. Restoring order rejects changed membership or invalid anchors. Restoring content records the prior state and advances versions; restoring a deleted item resolves position collisions without overwriting another item.
 
-The editor queues saves by entity, so changing selection does not discard pending edits. Navigation, preview, and order changes flush the queue first. Failed writes remain queued for an explicit retry.
+## Authoring and validation
 
-Template ordering is saved through `PATCH /api/templates/[id]/order`. The server locks the template, compares the client's expected item membership and placement, and applies the complete scoped ordering with its revision and audit event in one transaction. Global moves preserve every organization's anchors; individual organization moves explicitly change that snapshot's anchor. Restoring an order revision rejects changed membership. Recovering a removed global entry uses its old position when available and appends it when that position is occupied.
+TipTap instructions are constrained JSON: unknown nodes/marks are removed, depth/collection sizes are capped, and links are restricted to HTTP, HTTPS, and mailto. React renders snapshots without raw HTML injection.
 
-`/global-library` exposes live step editing, template usage, repetition, and deleted-step recovery. The template context endpoint reads approved normalized values from PostgreSQL and shares validation with preview. Opening Variables or Validation does not call IT Glue. Readiness checks apply to the selected organization's referenced variables; unused invalid variables remain visible without blocking the template.
+Autosave is queued per entity and uses expected item versions. Navigation, preview, and structural mutations flush pending saves. Failed drafts remain in the page for retry or explicit discard. The editor refreshes saved template data periodically and on focus; inherited changes appear automatically.
 
-Database clients, Auth.js configuration, and the IT Glue API key exist only in server modules. No raw IT Glue payload, secret header, password/upload trait, or unrestricted tag payload is returned to browser code or written to PostgreSQL.
+Preview, Variables, Validation, and checklist creation use the same merged-template renderer and stored organization context. Only enabled, approved definitions and projected normalized fields are exposed. Invalid unused variables are visible but do not block a template. Required missing/stale/schema-incompatible values, unresolved tokens, invalid repetition, missing anchors, empty results, and more than 1,000 expanded steps block creation. Rendering an oversized result records a validation failure rather than saving a truncated checklist.
+
+These workflows do not send IT Glue requests.
+
+## Frozen checklists
+
+Creation uses a repeatable-read transaction and parent/child locks. It validates enabled organization ownership and current approved values, then saves:
+
+- Resolved rich instructions and titles, immutable positions, source item IDs, and repetition indexes.
+- Referenced approved normalized values and refresh timestamps.
+- Organization-template and global-template versions and display-name snapshots.
+- An initial activity event and sanitized security audit event.
+
+The creator plus a UUID creation key is unique. Retries reuse the existing instance; conflicting key reuse is rejected. Bounded retries cover transaction conflicts. Inserts are batched to stay below PostgreSQL parameter limits, without partial or truncated results.
+
+Progress updates lock the checklist and step, require the expected step version, and return 409 on conflicts. Instructions, ordering, and source snapshots are not accepted by the progress API. Each step is pending, completed, or skipped. Skipping requires a non-empty reason; notes and reasons are plain text limited to 2,000 characters. Actor/time fields and append-only activity records are saved in the same transaction as progress and aggregate completion.
+
+All terminal steps complete the checklist; reopening any step reopens it. Completed and skipped counts stay separate. Administrators can soft-delete and restore instances, with no permanent-delete API. Deleting a source template does not remove its existing instances.
+
+## Access and credentials
+
+Only enabled users authenticated in the configured Entra tenant can use production. Admins/editors author templates; viewers can inspect them. All three roles can create and work on shared checklists. Only admins manage mappings/users and delete/restore checklist instances.
+
+Database clients, Auth.js configuration, and IT Glue credentials remain server-side. Synchronization retains only approved normalized fields; raw IT Glue responses, secret headers, password/upload traits, and unrestricted tag payloads are not persisted or sent to browsers. Errors are generic and do not log query payloads or credentials. User-authored notes and their changes are visible to authorized users in checklist activity, not written into security audit details.
+
+## Reset and migration
+
+Migration `0001_template_execution_redesign` clears only legacy templates, items, libraries, and template/step/order revisions; it records a reset audit event. Users, roles, organizations, approved definitions/mappings, normalized values, synchronization history, and prior security audits are retained. The migration runner requires `--confirm-template-reset` while that migration is pending, and journals the schema/reset atomically.
+
+Seed uses insert-on-conflict-do-nothing. It does not restore legacy libraries, create starter templates, or overwrite an approved/disabled/soft-deleted mapping. Isolated PGlite tests exercise both migrations with realistic legacy fixtures and verify preservation and repeated seeding.

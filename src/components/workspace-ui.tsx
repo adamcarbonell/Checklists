@@ -56,6 +56,29 @@ export async function api(url: string, method = "GET", body?: unknown) {
   if (!response.ok) {
     const result = await response.json().catch(() => ({}));
     const messages: Record<string, string> = {
+      template_changed_reload:
+        "This template changed in another session. Reload the latest version before retrying.",
+      step_changed_reload:
+        "Someone else changed this step. Refresh its latest state before retrying; your draft has been kept.",
+      inherited_step_read_only:
+        "Inherited steps can only be edited in their global template.",
+      template_has_org_links:
+        "This global template is linked by organization templates. Remove those links before deleting it.",
+      global_template_unavailable:
+        "The linked global template is unavailable. Restore it before continuing.",
+      checklist_context_invalid:
+        "Checklist creation is blocked. Review the org template’s Variables and Validation panels.",
+      empty_checklist:
+        "This template resolves to no steps. Add instructions before starting a checklist.",
+      checklist_step_limit:
+        "The resolved checklist exceeds 1,000 steps. Nothing was created.",
+      creation_key_conflict:
+        "This creation request was already used for another checklist. Close this dialog and start a new request.",
+      creation_busy_retry:
+        "Another request is finishing. Retry with the same checklist details.",
+      skip_reason_required: "Enter a reason before skipping this step.",
+      notes_too_long:
+        "Notes and skip reasons must be no longer than 2,000 characters.",
       order_changed_reload:
         "The step order changed in another session. Reload before trying again.",
       order_membership_changed:
@@ -64,8 +87,6 @@ export async function api(url: string, method = "GET", body?: unknown) {
         "Choose an active global step as the organization step’s anchor.",
       invalid_restored_anchor:
         "This order revision refers to an unavailable anchor.",
-      step_is_referenced:
-        "This global step is still used by a template. Remove its references before deleting it.",
       repeat_variable_must_be_active_list:
         "Repetition requires an active list variable.",
       invalid_request_body: "Check the required fields before saving.",
@@ -111,7 +132,7 @@ export function WorkspaceShell({
   children,
 }: {
   user: WorkspaceUser;
-  active: "templates" | "library";
+  active: "templates" | "organizations" | "checklists";
   counts?: Record<string, number>;
   beforeNavigate?: () => Promise<void>;
   children: ReactNode;
@@ -120,21 +141,21 @@ export function WorkspaceShell({
   const [error, setError] = useState("");
   const router = useRouter();
   const links = [
-    { key: "templates", label: "Templates", href: "/", icon: ListChecks },
+    { key: "checklists", label: "Checklists", href: "/", icon: ListChecks },
     {
-      key: "library",
-      label: "Global library",
-      href: "/global-library",
+      key: "templates",
+      label: "Global templates",
+      href: "/global-templates",
       icon: Layers3,
+    },
+    {
+      key: "organizations",
+      label: "Organizations",
+      href: "/organizations",
+      icon: AppWindow,
     },
     ...(user.role === "admin"
       ? [
-          {
-            key: "organizations",
-            label: "Organizations",
-            href: "/admin/organizations",
-            icon: AppWindow,
-          },
           {
             key: "variables",
             label: "Variables",
@@ -651,10 +672,7 @@ export function HistoryDialog({
             </div>
             <p className="mt-2 text-sm">
               {String(
-                row.snapshot.title ??
-                  row.snapshot.snapshotTitle ??
-                  row.snapshot.name ??
-                  "Template order",
+                row.snapshot.title ?? row.snapshot.name ?? "Template order",
               )}
             </p>
           </div>

@@ -1,64 +1,44 @@
 import { and, eq, isNull } from "drizzle-orm";
-import { getDatabase, type DatabaseTransaction } from "@/db/client";
-import { templateItems, templates } from "@/db/schema";
+import { getDatabase } from "@/db/client";
+import { templateItems } from "@/db/schema";
 import { recordAudit, recordRevision } from "./audit";
+import { loadWorkspace } from "./workspace-data";
+import { lockTemplate, bumpTemplate } from "./template-service";
 import {
   OrderError,
   orderEntry,
+  stepOrder,
   validateOrder,
+  validPlacement,
   type OrderEntry,
-  type OrderItem,
 } from "./template-order";
-
-export async function lockTemplate(tx: DatabaseTransaction, id: string) {
-  const [template] = await tx
-    .select({ id: templates.id })
-    .from(templates)
-    .where(and(eq(templates.id, id), isNull(templates.deletedAt)))
-    .for("update");
-  if (!template) throw new OrderError("template_not_found", 404);
-}
-export function toOrder(
-  rows: (typeof templateItems.$inferSelect)[],
-): OrderItem[] {
-  return rows.map((r) => ({
-    itemId: r.id,
-    kind: r.kind,
-    organizationId: r.organizationId,
-    position: r.position,
-    anchorItemId: r.anchorItemId,
-    placement: r.placement,
-  }));
-}
+export { lockTemplate } from "./template-service";
 export async function saveOrder(
   id: string,
   input: {
-    organizationId: string | null;
     movedItemId: string;
+    expectedVersion: number;
+    expectedParentVersion: number | null;
     expectedOrder: OrderEntry[];
     proposedOrder: OrderEntry[];
   },
   actorUserId: string,
 ) {
-  return getDatabase().transaction(async (tx) => {
-    await lockTemplate(tx, id);
-    const rows = await tx
-      .select()
-      .from(templateItems)
-      .where(
-        and(eq(templateItems.templateId, id), isNull(templateItems.deletedAt)),
-      )
-      .for("update");
-    const all = toOrder(rows);
-    const scoped = all.filter(
-      (r) => r.kind === "global" || r.organizationId === input.organizationId,
-    );
+  await getDatabase().transaction(async (tx) => {
+    const template = await lockTemplate(tx, id),
+      workspace = await loadWorkspace(id, tx);
+    if (!workspace) throw new OrderError("template_not_found", 404);
+    if (
+      template.version !== input.expectedVersion ||
+      (workspace.parent?.version ?? null) !== input.expectedParentVersion
+    )
+      throw new OrderError("order_changed_reload", 409);
     validateOrder(
-      scoped,
+      workspace.steps.map(stepOrder),
       input.expectedOrder,
       input.proposedOrder,
       input.movedItemId,
-      input.organizationId,
+      template.scope,
     );
     await recordRevision(
       {
@@ -66,38 +46,41 @@ export async function saveOrder(
         entityType: "template_order",
         entityId: id,
         action: "reorder",
-        snapshot: { items: all.map(orderEntry) },
+        snapshot: {
+          items: workspace.steps
+            .filter((step) => !step.inherited)
+            .map(stepOrder)
+            .map(orderEntry),
+        },
       },
       tx,
     );
-    for (const entry of input.proposedOrder)
+    for (const entry of input.proposedOrder.filter((row) =>
+      workspace.steps.some((step) => step.id === row.itemId && !step.inherited),
+    )) {
+      const current = workspace.steps.find((step) => step.id === entry.itemId)!;
       await tx
         .update(templateItems)
         .set({
           position: entry.position,
           anchorItemId: entry.anchorItemId,
           placement: entry.placement,
+          version: current.version + 1,
           updatedAt: new Date(),
         })
         .where(eq(templateItems.id, entry.itemId));
-    await tx
-      .update(templates)
-      .set({ updatedAt: new Date() })
-      .where(eq(templates.id, id));
+    }
+    await bumpTemplate(tx, id);
     await recordAudit(
       {
         actorUserId,
         eventType: "template.order_changed",
         entityType: "template",
         entityId: id,
-        details: {
-          movedItemId: input.movedItemId,
-          organizationId: input.organizationId,
-        },
+        details: { movedItemId: input.movedItemId },
       },
       tx,
     );
-    return input.proposedOrder;
   });
 }
 export async function restoreOrder(
@@ -106,33 +89,30 @@ export async function restoreOrder(
   actorUserId: string,
 ) {
   await getDatabase().transaction(async (tx) => {
-    await lockTemplate(tx, id);
-    const rows = await tx
-      .select()
-      .from(templateItems)
-      .where(
-        and(eq(templateItems.templateId, id), isNull(templateItems.deletedAt)),
-      )
-      .for("update");
+    const template = await lockTemplate(tx, id),
+      workspace = await loadWorkspace(id, tx);
+    if (!workspace) throw new OrderError("template_not_found", 404);
+    const current = workspace.steps.filter((step) => !step.inherited);
     if (
-      new Set(items.map((i) => i.itemId)).size !== items.length ||
-      JSON.stringify(rows.map((r) => r.id).sort()) !==
-        JSON.stringify(items.map((i) => i.itemId).sort())
+      new Set(items.map((row) => row.itemId)).size !== items.length ||
+      JSON.stringify(items.map((row) => row.itemId).sort()) !==
+        JSON.stringify(current.map((row) => row.id).sort())
     )
       throw new OrderError("order_membership_changed", 409);
-    const globals = new Set(
-      rows.filter((r) => r.kind === "global").map((r) => r.id),
+    const anchors = new Set(
+      workspace.steps.filter((step) => step.inherited).map((step) => step.id),
     );
-    for (const item of items) {
-      const row = rows.find((r) => r.id === item.itemId)!;
-      if (
-        row.kind === "global"
-          ? !!item.anchorItemId || !!item.placement
-          : !item.anchorItemId ||
-            !globals.has(item.anchorItemId) ||
-            !item.placement
-      )
+    for (const entry of items)
+      if (!validPlacement(entry, anchors, template.scope))
         throw new OrderError("invalid_restored_anchor", 409);
+    const buckets = new Map<string, Set<number>>();
+    for (const entry of items) {
+      const key = entry.placement + ":" + entry.anchorItemId,
+        positions = buckets.get(key) ?? new Set<number>();
+      if (positions.has(entry.position))
+        throw new OrderError("duplicate_position", 409);
+      positions.add(entry.position);
+      buckets.set(key, positions);
     }
     await recordRevision(
       {
@@ -140,24 +120,29 @@ export async function restoreOrder(
         entityType: "template_order",
         entityId: id,
         action: "pre_restore",
-        snapshot: { items: toOrder(rows).map(orderEntry) },
+        snapshot: { items: current.map(stepOrder).map(orderEntry) },
       },
       tx,
     );
-    for (const item of items)
+    for (const entry of items) {
+      const row = current.find((step) => step.id === entry.itemId)!;
       await tx
         .update(templateItems)
         .set({
-          position: item.position,
-          anchorItemId: item.anchorItemId,
-          placement: item.placement,
+          position: entry.position,
+          anchorItemId: entry.anchorItemId,
+          placement: entry.placement,
+          version: row.version + 1,
           updatedAt: new Date(),
         })
-        .where(eq(templateItems.id, item.itemId));
-    await tx
-      .update(templates)
-      .set({ updatedAt: new Date() })
-      .where(eq(templates.id, id));
+        .where(
+          and(
+            eq(templateItems.id, entry.itemId),
+            isNull(templateItems.deletedAt),
+          ),
+        );
+    }
+    await bumpTemplate(tx, id);
     await recordAudit(
       {
         actorUserId,

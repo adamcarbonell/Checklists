@@ -1,42 +1,51 @@
-import { asc, isNull } from "drizzle-orm";
-import { getDatabase } from "@/db/client";
-import { templates } from "@/db/schema";
+import { z } from "zod";
 import { requireRole } from "@/lib/access";
-import { recordAudit } from "@/lib/audit";
-import { errorResponse, readJson, templateCreateSchema } from "@/lib/input";
-
+import { errorResponse, readJson } from "@/lib/input";
+import { createTemplate } from "@/lib/template-service";
+import { loadTemplates } from "@/lib/workspace-data";
+const schema = z
+  .object({
+    scope: z.enum(["global", "organization"]),
+    name: z.string().trim().min(1).max(160).optional(),
+    description: z.string().trim().max(2000).optional(),
+    organizationId: z.uuid().optional(),
+    globalTemplateId: z.uuid().optional(),
+  })
+  .strict();
 export async function GET(request: Request) {
   const access = await requireRole("viewer");
   if (!access.ok) return access.response;
-  const rows = await getDatabase()
-    .select()
-    .from(templates)
-    .where(
-      new URL(request.url).searchParams.get("includeDeleted") === "true"
-        ? undefined
-        : isNull(templates.deletedAt),
-    )
-    .orderBy(asc(templates.name));
-  return Response.json({ data: rows });
+  try {
+    const query = z
+      .object({
+        scope: z.enum(["global", "organization"]).optional(),
+        organizationId: z.uuid().optional(),
+        includeDeleted: z.enum(["true", "false"]).optional(),
+      })
+      .parse(Object.fromEntries(new URL(request.url).searchParams));
+    return Response.json({
+      data: await loadTemplates({
+        ...query,
+        includeDeleted: query.includeDeleted === "true",
+      }),
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
-
 export async function POST(request: Request) {
   const access = await requireRole("editor");
   if (!access.ok) return access.response;
   try {
-    const input = await readJson(request, templateCreateSchema);
-    const [created] = await getDatabase()
-      .insert(templates)
-      .values(input)
-      .returning();
-    await recordAudit({
-      actorUserId: access.user.id,
-      eventType: "template.created",
-      entityType: "template",
-      entityId: created.id,
-      details: { name: created.name },
-    });
-    return Response.json({ data: created }, { status: 201 });
+    return Response.json(
+      {
+        data: await createTemplate(
+          await readJson(request, schema),
+          access.user.id,
+        ),
+      },
+      { status: 201 },
+    );
   } catch (error) {
     return errorResponse(error);
   }

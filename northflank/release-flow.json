@@ -8,19 +8,43 @@
       "type": "sequential",
       "steps": [
         {
-          "kind": "Release",
+          "kind": "Build",
+          "ref": "release-build",
           "spec": {
-            "type": "build",
-            "origin": { "id": "checklists-web", "branch": "main", "build": "latest" },
-            "target": { "id": "checklists-migrate", "type": "job" }
-          }
+            "id": "checklists-web",
+            "type": "service",
+            "branch": "main",
+            "reuseExistingBuilds": true,
+            "buildRuleFallThroughHandling": "fail"
+          },
+          "condition": "success"
         },
-        { "kind": "JobRun", "spec": { "jobId": "checklists-migrate" }, "condition": "success" },
         {
           "kind": "Release",
           "spec": {
             "type": "build",
-            "origin": { "id": "checklists-web", "branch": "main", "build": "latest" },
+            "origin": {
+              "id": "checklists-web",
+              "branch": "${refs.release-build.branch}",
+              "build": "${refs.release-build.id}"
+            },
+            "target": { "id": "checklists-migrate", "type": "job" }
+          }
+        },
+        {
+          "kind": "JobRun",
+          "spec": { "jobId": "checklists-migrate" },
+          "condition": "success"
+        },
+        {
+          "kind": "Release",
+          "spec": {
+            "type": "build",
+            "origin": {
+              "id": "checklists-web",
+              "branch": "${refs.release-build.branch}",
+              "build": "${refs.release-build.id}"
+            },
             "target": { "id": "checklists-web", "type": "service" }
           }
         }

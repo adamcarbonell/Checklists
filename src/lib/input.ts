@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { RichNode } from "./template-engine";
+import { OrderError } from "./template-order";
 
 const allowedNodes = new Set([
   "doc",
@@ -106,6 +107,10 @@ export async function readJson<T>(
 export class InputError extends Error {}
 
 export function errorResponse(error: unknown) {
+  if (error instanceof z.ZodError)
+    return Response.json({ error: "invalid_request_body" }, { status: 400 });
+  if (error instanceof OrderError)
+    return Response.json({ error: error.message }, { status: error.status });
   if (error instanceof InputError)
     return Response.json({ error: error.message }, { status: 400 });
   // Database errors can contain query parameters; never put their payload in logs.

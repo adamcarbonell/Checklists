@@ -1,20 +1,30 @@
 import type { RichNode, RenderIssue, RenderedStep } from "./template-engine";
 import type { AppRole } from "./roles";
-
 export type WorkspaceUser = { name: string; email: string; role: AppRole };
+export type Placement = "start" | "end" | "before" | "after";
+export type TemplateSummary = {
+  id: string;
+  name: string;
+  scope: "global" | "organization";
+  organizationId: string | null;
+  globalTemplateId: string | null;
+  version: number;
+  deletedAt?: string | null;
+};
 export type WorkspaceStep = {
   id: string;
-  sourceId: string | null;
+  templateId: string;
   title: string;
   body: RichNode;
   kind: "global" | "org";
+  inherited: boolean;
   position: number;
   organizationId: string | null;
   anchorItemId: string | null;
-  placement: "before" | "after" | null;
+  placement: Placement | null;
   repeatVariableId: string | null;
   repeat?: string;
-  sourceMissing?: boolean;
+  version: number;
 };
 export type VariableDefinitionSummary = {
   id: string;
@@ -28,11 +38,14 @@ export type WorkspaceData = {
   templateId: string;
   templateName: string;
   templateDescription: string;
+  scope: "global" | "organization";
+  organizationId: string | null;
+  organizationName: string | null;
+  parent: { id: string; name: string; version: number } | null;
+  version: number;
   steps: WorkspaceStep[];
   organizations: { id: string; name: string }[];
   definitions: VariableDefinitionSummary[];
-  templates: { id: string; name: string }[];
-  globalCount: number;
 };
 export type ContextVariable = VariableDefinitionSummary & {
   value: unknown;
@@ -48,12 +61,53 @@ export type TemplateContext = {
   invalidVariables: string[];
   valid: boolean;
   steps: RenderedStep[];
+  templateVersion: number;
+  parentVersion: number | null;
 };
-export type LibraryStep = {
+export type ChecklistSummary = {
   id: string;
+  name: string;
+  organizationId: string;
+  organizationName: string;
+  templateName: string;
+  status: "active" | "completed";
+  completed: number;
+  skipped: number;
+  total: number;
+  createdAt: string;
+  completedAt: string | null;
+  deletedAt: string | null;
+};
+export type ChecklistStep = {
+  id: string;
+  sourceItemId: string;
+  repeatIndex: number | null;
+  position: number;
   title: string;
   body: RichNode;
-  repeatVariableId: string | null;
-  deletedAt?: string | null;
-  references: { id: string; name: string }[];
+  status: "pending" | "completed" | "skipped";
+  notes: string;
+  skipReason: string;
+  version: number;
+  statusChangedBy: string | null;
+  statusChangedAt: string | null;
+  notesChangedBy: string | null;
+  notesChangedAt: string | null;
+};
+export type ChecklistDetail = ChecklistSummary & {
+  templateId: string;
+  globalTemplateId: string;
+  templateVersion: number;
+  globalTemplateVersion: number;
+  variableSnapshot: Record<string, { value: unknown; syncedAt: string | null }>;
+  people: Record<string, string>;
+  steps: ChecklistStep[];
+};
+export type ActivityEntry = {
+  id: string;
+  stepId: string | null;
+  actor: string;
+  event: string;
+  changes: Record<string, unknown>;
+  createdAt: string;
 };

@@ -2,126 +2,131 @@ import { describe, it, expect } from "vitest";
 import {
   moveStep,
   visibleOrder,
+  stepOrder,
   validateOrder,
-  type OrderItem,
 } from "./template-order";
 import type { WorkspaceStep } from "./workspace-types";
-const step = (
+const row = (
   id: string,
   kind: "global" | "org",
   position: number,
-  organizationId: string | null = null,
   anchorItemId: string | null = null,
-  placement: "before" | "after" | null = null,
+  placement: WorkspaceStep["placement"] = null,
+  inherited = kind === "global",
 ): WorkspaceStep => ({
   id,
-  sourceId: id,
+  templateId: inherited ? "parent" : "child",
   title: id,
   body: { type: "doc" },
   kind,
+  inherited,
   position,
-  organizationId,
+  organizationId: kind === "org" ? "org" : null,
   anchorItemId,
   placement,
   repeatVariableId: null,
+  version: 1,
 });
 const rows = [
-  step("g1", "global", 100),
-  step("g2", "global", 200),
-  step("a", "org", 100, "org-a", "g1", "after"),
-  step("b", "org", 100, "org-b", "g1", "before"),
+  row("g1", "global", 100),
+  row("g2", "global", 200),
+  row("local", "org", 100, "g1", "after"),
+  row("start", "org", 100, null, "start"),
+  row("end", "org", 100, null, "end"),
 ];
-const entries = (steps: WorkspaceStep[]): OrderItem[] =>
-  steps.map((s) => ({
-    itemId: s.id,
-    kind: s.kind === "global" ? "global" : "organization",
-    organizationId: s.organizationId,
-    position: s.position,
-    anchorItemId: s.anchorItemId,
-    placement: s.placement,
-  }));
-describe("template ordering", () => {
-  it("moves a global block and preserves every organization anchor", () => {
-    const result = moveStep(rows, "g1", "g2", "after", "org-a");
-    expect(visibleOrder(result, "org-a").map((s) => s.id)).toEqual([
-      "g2",
+describe("owned and inherited ordering", () => {
+  it("merges start/end additions around inherited anchors", () => {
+    expect(visibleOrder(rows).map((step) => step.id)).toEqual([
+      "start",
       "g1",
-      "a",
-    ]);
-    expect(visibleOrder(result, "org-b").map((s) => s.id)).toEqual([
+      "local",
       "g2",
-      "b",
-      "g1",
+      "end",
     ]);
-    expect(result.find((s) => s.id === "b")).toEqual(rows[3]);
   });
-  it("reanchors only the dragged organization step", () => {
-    const result = moveStep(rows, "a", "g2", "before", "org-a");
-    expect(visibleOrder(result, "org-a").map((s) => s.id)).toEqual([
-      "g1",
-      "a",
-      "g2",
-    ]);
-    expect(result.find((s) => s.id === "a")).toMatchObject({
-      anchorItemId: "g2",
-      placement: "before",
-    });
-    expect(result.find((s) => s.id === "b")).toEqual(rows[3]);
-  });
-  it("keeps orphaned snapshots visible and permits explicit repair", () => {
-    const broken = [
-      ...rows,
-      step("lost", "org", 200, "org-a", "gone", "after"),
+  it("carries local additions when the global parent order changes", () => {
+    const parent = rows
+      .filter((step) => step.kind === "global")
+      .map((step) => ({ ...step, inherited: false }));
+    const changed = moveStep(parent, "g1", "g2", "after");
+    const combined = [
+      ...changed.map((step) => ({ ...step, inherited: true })),
+      ...rows.filter((step) => step.kind === "org"),
     ];
-    expect(visibleOrder(broken, "org-a").at(-1)?.id).toBe("lost");
-    expect(
-      moveStep(broken, "lost", "g2", "after", "org-a").find(
-        (s) => s.id === "lost",
-      )?.anchorItemId,
-    ).toBe("g2");
+    expect(visibleOrder(combined).map((step) => step.id)).toEqual([
+      "start",
+      "g2",
+      "g1",
+      "local",
+      "end",
+    ]);
   });
-  it("rejects stale order, duplicate IDs, foreign IDs, and anchor changes during a global move", () => {
-    const current = entries(
-      rows.filter((s) => s.kind === "global" || s.organizationId === "org-a"),
-    );
-    expect(() =>
-      validateOrder(
-        current,
-        current.map((s) => ({ ...s, position: 0 })),
-        current,
-        "g1",
-        "org-a",
+  it("moves a local step into another inherited group or a boundary", () => {
+    expect(
+      moveStep(rows, "local", "g2", "before").find(
+        (step) => step.id === "local",
       ),
-    ).toThrow("order_changed_reload");
+    ).toMatchObject({ anchorItemId: "g2", placement: "before" });
+    expect(
+      moveStep(rows, "local", "end", "after").find(
+        (step) => step.id === "local",
+      ),
+    ).toMatchObject({ anchorItemId: null, placement: "end" });
+  });
+  it("keeps orphaned additions visible and supports explicit repair", () => {
+    const broken = rows.map((step) =>
+      step.id === "local" ? { ...step, anchorItemId: "missing" } : step,
+    );
+    expect(visibleOrder(broken).at(-1)?.id).toBe("local");
+    expect(
+      moveStep(broken, "local", "start", "after").find(
+        (step) => step.id === "local",
+      )?.placement,
+    ).toBe("start");
+  });
+  it("rejects inherited mutation, foreign/duplicate IDs, stale order, and invalid anchors", () => {
+    const current = rows.map(stepOrder);
+    expect(() =>
+      validateOrder(current, current, current, "g1", "organization"),
+    ).toThrow("inherited_step_read_only");
     expect(() =>
       validateOrder(
         current,
         current,
-        [current[0], current[0], current[2]],
-        "g1",
-        "org-a",
+        current.slice(1),
+        "local",
+        "organization",
       ),
     ).toThrow("invalid_order_membership");
     expect(() =>
       validateOrder(
         current,
         current,
-        current.map((s) =>
-          s.itemId === "a" ? { ...s, anchorItemId: "g2" } : s,
-        ),
-        "g1",
-        "org-a",
+        [...current.slice(1), current[1]],
+        "local",
+        "organization",
       ),
-    ).toThrow("anchor_change_not_allowed");
+    ).toThrow("invalid_order_membership");
+    expect(() =>
+      validateOrder(
+        current,
+        current.map((entry) => ({ ...entry, position: 0 })),
+        current,
+        "local",
+        "organization",
+      ),
+    ).toThrow("order_changed_reload");
     expect(() =>
       validateOrder(
         current,
         current,
-        current.map((s) =>
-          s.itemId === "a" ? { ...s, anchorItemId: "foreign" } : s,
+        current.map((entry) =>
+          entry.itemId === "local"
+            ? { ...entry, anchorItemId: "foreign" }
+            : entry,
         ),
-        "a",
-        "org-a",
+        "local",
+        "organization",
       ),
     ).toThrow("invalid_anchor");
   });

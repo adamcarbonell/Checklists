@@ -30,6 +30,7 @@ COPY --from=builder --chown=checklist:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=checklist:nodejs /app/scripts ./scripts
 COPY --from=builder --chown=checklist:nodejs /app/src ./src
 COPY --from=builder --chown=checklist:nodejs /app/drizzle ./drizzle
+COPY --from=builder --chown=checklist:nodejs /app/tsconfig.json ./tsconfig.json
 USER checklist
 EXPOSE 3000
 CMD ["node", "server.js"]

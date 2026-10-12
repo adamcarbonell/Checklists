@@ -1,10 +1,17 @@
 import { and, eq, isNull } from "drizzle-orm";
-import { getDatabase } from "@/db/client";
+import {
+  getDatabase,
+  type Database,
+  type DatabaseTransaction,
+} from "@/db/client";
 import { variableDefinitions } from "@/db/schema";
 import { InputError } from "./input";
-export async function validateRepeatVariable(id?: string | null) {
+export async function validateRepeatVariable(
+  id?: string | null,
+  db: Database | DatabaseTransaction = getDatabase(),
+) {
   if (!id) return;
-  const [row] = await getDatabase()
+  const [row] = await db
     .select({ id: variableDefinitions.id })
     .from(variableDefinitions)
     .where(

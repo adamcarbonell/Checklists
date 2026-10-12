@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   render,
   screen,
@@ -8,18 +8,20 @@ import {
   cleanup,
 } from "@testing-library/react";
 import type { ReactNode } from "react";
-import type { WorkspaceData, TemplateContext } from "@/lib/workspace-types";
-const mocks = vi.hoisted(() => ({
-  push: vi.fn(),
-  refresh: vi.fn(),
-  signOut: vi.fn(),
-}));
+import type {
+  WorkspaceData,
+  ChecklistDetail,
+  TemplateSummary,
+  TemplateContext,
+} from "@/lib/workspace-types";
+const mocks = vi.hoisted(() => ({ push: vi.fn(), signOut: vi.fn() }));
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mocks.push, refresh: mocks.refresh }),
+  useRouter: () => ({ push: mocks.push, refresh: vi.fn() }),
 }));
 vi.mock("next-auth/react", () => ({ signOut: mocks.signOut }));
 vi.mock("@dnd-kit/react", () => ({
   DragDropProvider: ({ children }: { children: ReactNode }) => children,
+  useDroppable: () => ({ ref: () => {}, isDropTarget: false }),
 }));
 vi.mock("@dnd-kit/react/sortable", () => ({
   useSortable: () => ({
@@ -28,6 +30,7 @@ vi.mock("@dnd-kit/react/sortable", () => ({
     isDragSource: false,
     isDropTarget: false,
   }),
+  isSortable: () => false,
 }));
 vi.mock("./rich-text-editor", () => ({
   RichTextEditor: ({
@@ -37,7 +40,7 @@ vi.mock("./rich-text-editor", () => ({
     onInsertVariable,
   }: {
     value: { content?: { content?: { text?: string }[] }[] };
-    onChange: (v: unknown) => void;
+    onChange: (value: unknown) => void;
     editable: boolean;
     onInsertVariable: () => void;
   }) => (
@@ -46,13 +49,13 @@ vi.mock("./rich-text-editor", () => ({
         aria-label="Instructions"
         disabled={!editable}
         value={value.content?.[0]?.content?.[0]?.text ?? ""}
-        onChange={(e) =>
+        onChange={(event) =>
           onChange({
             type: "doc",
             content: [
               {
                 type: "paragraph",
-                content: [{ type: "text", text: e.target.value }],
+                content: [{ type: "text", text: event.target.value }],
               },
             ],
           })
@@ -62,78 +65,98 @@ vi.mock("./rich-text-editor", () => ({
     </>
   ),
 }));
-import { ChecklistWorkspace } from "./checklist-workspace";
-import { GlobalLibrary } from "./global-library";
+import { TemplateWorkspace } from "./template-workspace";
+import { TemplateCatalog, OrganizationDirectory } from "./template-catalog";
+import { ChecklistBoard } from "./checklist-board";
+import { ChecklistRun } from "./checklist-run";
 const user = {
-  name: "Test Editor",
-  email: "editor@example.test",
-  role: "editor" as const,
-};
-const data: WorkspaceData = {
-  templateId: "template-1",
-  templateName: "Test template",
-  templateDescription: "Example",
-  globalCount: 2,
+    name: "Editor",
+    email: "editor@example.test",
+    role: "editor" as const,
+  },
+  viewer = { ...user, role: "viewer" as const };
+const doc = (text: string) => ({
+  type: "doc",
+  content: [{ type: "paragraph", content: [{ type: "text", text }] }],
+});
+const fixture: WorkspaceData = {
+  templateId: "child",
+  templateName: "Client onboarding",
+  templateDescription: "Client",
+  scope: "organization",
+  organizationId: "org-1",
+  organizationName: "Client One",
+  parent: { id: "parent", name: "Standard onboarding", version: 3 },
+  version: 2,
   organizations: [
-    { id: "org-1", name: "Organization One" },
-    { id: "org-2", name: "Organization Two" },
+    { id: "org-1", name: "Client One" },
+    { id: "org-2", name: "Client Two" },
   ],
-  templates: [{ id: "template-1", name: "Test template" }],
   definitions: [
     {
-      id: "list-1",
+      id: "list",
       key: "org.applications",
       label: "Applications",
       cardinality: "list",
-      schemaValid: true,
       enabled: true,
+      schemaValid: true,
     },
   ],
   steps: [
     {
-      id: "one",
-      sourceId: "source-one",
+      id: "inherited",
+      templateId: "parent",
+      title: "Inherited standard",
+      body: doc("Standard instructions"),
       kind: "global",
-      title: "First step",
-      body: { type: "doc" },
+      inherited: true,
       position: 100,
       organizationId: null,
       anchorItemId: null,
       placement: null,
       repeatVariableId: null,
+      version: 1,
     },
     {
-      id: "two",
-      sourceId: "source-two",
-      kind: "global",
-      title: "Second step",
-      body: { type: "doc" },
-      position: 200,
-      organizationId: null,
-      anchorItemId: null,
-      placement: null,
-      repeatVariableId: null,
-    },
-    {
-      id: "snapshot",
-      sourceId: "org-source",
+      id: "local",
+      templateId: "child",
+      title: "Local client step",
+      body: doc("Only this client"),
       kind: "org",
-      title: "Org One snapshot",
-      body: { type: "doc" },
+      inherited: false,
       position: 100,
       organizationId: "org-1",
-      anchorItemId: "one",
+      anchorItemId: "inherited",
       placement: "after",
       repeatVariableId: null,
+      version: 1,
     },
   ],
 };
-const context: TemplateContext = {
+const parent: TemplateSummary = {
+  id: "parent",
+  name: "Standard onboarding",
+  scope: "global",
+  organizationId: null,
+  globalTemplateId: null,
+  version: 3,
+  deletedAt: null,
+};
+const child: TemplateSummary = {
+  id: "child",
+  name: "Client onboarding",
+  scope: "organization",
+  organizationId: "org-1",
+  globalTemplateId: "parent",
+  version: 2,
+  deletedAt: null,
+};
+const templateContext: TemplateContext = {
   organizationId: "org-1",
   variables: [
     {
-      ...data.definitions[0],
-      value: [{ name: "Example app" }],
+      ...fixture.definitions[0],
+      value: [{ name: "Approved app" }],
       status: "valid",
       issues: [],
       syncedAt: new Date().toISOString(),
@@ -144,15 +167,59 @@ const context: TemplateContext = {
   invalidVariables: [],
   valid: true,
   steps: [],
+  templateVersion: 2,
+  parentVersion: 3,
 };
-let requests: {
-  url: string;
-  method: string;
-  body: Record<string, unknown> | null;
-}[];
+const runFixture: ChecklistDetail = {
+  id: "run",
+  name: "New hire",
+  organizationId: "org-1",
+  organizationName: "Client One",
+  templateName: "Client onboarding",
+  templateId: "child",
+  globalTemplateId: "parent",
+  templateVersion: 2,
+  globalTemplateVersion: 3,
+  variableSnapshot: {},
+  people: { actor: "Team member" },
+  status: "active",
+  completed: 0,
+  skipped: 0,
+  total: 2,
+  createdAt: new Date().toISOString(),
+  completedAt: null,
+  deletedAt: null,
+  steps: [1, 2].map((position) => ({
+    id: "step-" + position,
+    sourceItemId: "source-" + position,
+    repeatIndex: null,
+    position,
+    title: "Frozen step " + position,
+    body: doc("Frozen instructions " + position),
+    status: "pending",
+    notes: "",
+    skipReason: "",
+    statusChangedBy: null,
+    statusChangedAt: null,
+    notesChangedBy: null,
+    notesChangedAt: null,
+    version: 1,
+  })),
+};
+let workspace: WorkspaceData,
+  run: ChecklistDetail,
+  requests: {
+    url: string;
+    method: string;
+    body: Record<string, unknown> | null;
+  }[],
+  forceConflict: boolean;
 beforeEach(() => {
-  requests = [];
   vi.clearAllMocks();
+  workspace = structuredClone(fixture);
+  run = structuredClone(runFixture);
+  requests = [];
+  forceConflict = false;
   Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
     configurable: true,
     value: function () {
@@ -165,233 +232,397 @@ beforeEach(() => {
       this.removeAttribute("open");
     },
   });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.stubGlobal(
     "fetch",
     vi.fn(
       async (url: string, options: { method?: string; body?: string } = {}) => {
-        requests.push({
-          url,
-          method: options.method ?? "GET",
-          body: options.body ? JSON.parse(options.body) : null,
-        });
-        return new Response(
-          JSON.stringify({
-            data:
-              url === "/api/templates" && options.method === "POST"
-                ? { id: "created-template" }
-                : url.includes("context?")
-                  ? context
-                  : url.includes("workspace")
-                    ? data
-                    : [],
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
+        const method = options.method ?? "GET",
+          body = options.body ? JSON.parse(options.body) : null;
+        requests.push({ url, method, body });
+        let result: unknown = { data: [] };
+        if (url.includes("/workspace"))
+          result = { data: structuredClone(workspace) };
+        else if (url.includes("/context?")) result = { data: templateContext };
+        else if (url.includes("/items") && method === "PATCH") {
+          const id = new URL(url, "http://local").searchParams.get("itemId")!;
+          workspace.version++;
+          workspace.steps = workspace.steps.map((step) =>
+            step.id === id
+              ? { ...step, ...body, version: step.version + 1 }
+              : step,
+          );
+          result = {
+            data: {
+              ...workspace.steps.find((step) => step.id === id),
+              templateVersion: workspace.version,
+            },
+          };
+        } else if (url.includes("/items") && method === "POST") {
+          const step = {
+            ...fixture.steps[1],
+            ...body,
+            id: "new-local",
+            version: 1,
+            position: 200,
+          };
+          workspace.steps.push(step);
+          workspace.version++;
+          result = { data: step };
+        } else if (url === "/api/templates" && method === "POST")
+          result = { data: { id: "created-template" } };
+        else if (url === "/api/checklists" && method === "POST")
+          result = { data: { id: "created-run" } };
+        else if (url.includes("/steps/") && method === "PATCH") {
+          if (forceConflict) {
+            forceConflict = false;
+            run.steps[0] = {
+              ...run.steps[0],
+              notes: "Another person's notes",
+              version: 2,
+            };
+            return Response.json(
+              { error: "step_changed_reload" },
+              { status: 409 },
+            );
+          }
+          const id = url.split("/").at(-1)!;
+          run.steps = run.steps.map((step) =>
+            step.id === id
+              ? {
+                  ...step,
+                  ...(body.status ? { status: body.status } : {}),
+                  ...(body.notes !== undefined ? { notes: body.notes } : {}),
+                  ...(body.skipReason !== undefined
+                    ? { skipReason: body.skipReason }
+                    : {}),
+                  version: step.version + 1,
+                  statusChangedBy: "actor",
+                  statusChangedAt: new Date().toISOString(),
+                }
+              : step,
+          );
+          run.completed = run.steps.filter(
+            (step) => step.status === "completed",
+          ).length;
+          run.skipped = run.steps.filter(
+            (step) => step.status === "skipped",
+          ).length;
+          run.status =
+            run.completed + run.skipped === run.total ? "completed" : "active";
+          result = { data: structuredClone(run) };
+        } else if (url.includes("/activity"))
+          result = { data: [], page: 1, hasMore: false };
+        else if (url.startsWith("/api/checklists/run"))
+          result = { data: structuredClone(run) };
+        else if (url.startsWith("/api/checklists?"))
+          result = { data: [], total: 0, page: 1, pageSize: 50 };
+        return Response.json(result);
       },
     ),
   );
 });
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
-describe("workspace controls", () => {
-  it("creates templates using an in-page form without browser prompt support", async () => {
-    const prompt = vi.spyOn(window, "prompt").mockImplementation(() => {
-      throw new Error("prompt unavailable");
-    });
-    try {
-      render(<ChecklistWorkspace initialData={data} user={user} />);
-      fireEvent.click(screen.getByRole("button", { name: "New template" }));
-      expect(
-        await screen.findByRole("dialog", { name: "New template" }),
-      ).toBeTruthy();
-      expect(
-        (
-          screen.getByRole("button", {
-            name: "Create template",
-          }) as HTMLButtonElement
-        ).disabled,
-      ).toBe(true);
-      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(requests.some((request) => request.method === "POST")).toBe(false);
-      fireEvent.click(screen.getByRole("button", { name: "New template" }));
-      fireEvent.change(screen.getByLabelText("Template name"), {
-        target: { value: "New checklist" },
-      });
-      fireEvent.click(screen.getByRole("button", { name: "Create template" }));
-      await waitFor(() =>
-        expect(mocks.push).toHaveBeenCalledWith(
-          "/?templateId=created-template",
-        ),
-      );
-      expect(
-        requests.find((request) => request.url === "/api/templates")?.body,
-      ).toEqual({ name: "New checklist" });
-      expect(prompt).not.toHaveBeenCalled();
-    } finally {
-      prompt.mockRestore();
-    }
-  });
-  it("inserts variable tokens from an in-page form and saves the step", async () => {
-    render(<ChecklistWorkspace initialData={data} user={user} />);
-    fireEvent.click(screen.getByRole("button", { name: "Variable" }));
+describe("new template authoring", () => {
+  it("keeps inherited steps read-only and exposes editable local instructions", async () => {
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
     expect(
-      await screen.findByRole("dialog", { name: "Insert variable" }),
+      (screen.getByRole("textbox", { name: "Step title" }) as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Drag step 1: Inherited standard",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /^Local client step/ }));
+    expect(
+      (screen.getByRole("textbox", { name: "Step title" }) as HTMLInputElement)
+        .disabled,
+    ).toBe(false);
+    expect(
+      screen.getByRole("combobox", { name: "Local step placement" }),
     ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Insert variable" }));
-    await waitFor(
-      () =>
-        expect(requests.some((request) => request.method === "PATCH")).toBe(
-          true,
-        ),
-      { timeout: 2000 },
-    );
-    expect(
-      JSON.stringify(
-        requests.find((request) => request.method === "PATCH")?.body,
-      ),
-    ).toContain("{{org.applications}}");
+    expect(screen.getByText(/never added to a reusable library/)).toBeTruthy();
   });
-  it("switches diagnostic tabs and organization-specific snapshots", async () => {
-    render(<ChecklistWorkspace initialData={data} user={user} />);
+  it("creates local steps only in the current template, with no library request", async () => {
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add local step" }));
     await waitFor(() =>
-      expect(requests.some((r) => r.url.includes("context?"))).toBe(true),
+      expect(requests.some((request) => request.method === "POST")).toBe(true),
     );
-    fireEvent.click(screen.getByRole("tab", { name: "Variables" }));
-    expect(
-      await screen.findByText("Example app", { exact: false }),
-    ).toBeTruthy();
-    fireEvent.click(screen.getByRole("tab", { name: "Validation" }));
-    expect(await screen.findByText("Ready to preview")).toBeTruthy();
-    fireEvent.click(screen.getByRole("tab", { name: "Canvas" }));
-    fireEvent.change(
-      screen.getByRole("combobox", { name: "Preview organization" }),
-      { target: { value: "org-2" } },
+    expect(requests.find((request) => request.method === "POST")).toMatchObject(
+      {
+        url: "/api/templates/child/items",
+        body: { placement: "after", anchorItemId: "inherited" },
+      },
     );
     expect(
-      screen.queryByRole("button", { name: /Org One snapshot/ }),
-    ).toBeNull();
-    await waitFor(() =>
-      expect(requests.some((r) => r.url.includes("organizationId=org-2"))).toBe(
-        true,
+      requests.some(
+        (request) =>
+          request.url.includes("global-steps") ||
+          request.url.includes("/organizations/"),
       ),
-    );
+    ).toBe(false);
   });
-  it("saves repetition and both step drafts across rapid selection changes", async () => {
-    render(<ChecklistWorkspace initialData={data} user={user} />);
-    fireEvent.click(
-      screen.getByRole("checkbox", { name: "Repeat for a list variable" }),
-    );
-    fireEvent.change(
-      screen.getByRole("combobox", { name: "Repeat list variable" }),
-      { target: { value: "list-1" } },
-    );
+  it("saves independent drafts across fast selection changes with expected versions", async () => {
+    workspace = {
+      ...workspace,
+      templateId: "parent",
+      scope: "global",
+      organizationId: null,
+      organizationName: null,
+      parent: null,
+      steps: [
+        { ...fixture.steps[0], inherited: false },
+        {
+          ...fixture.steps[0],
+          id: "second",
+          title: "Second standard",
+          inherited: false,
+          position: 200,
+        },
+      ],
+    };
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
     fireEvent.change(screen.getByRole("textbox", { name: "Step title" }), {
       target: { value: "Edited first" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /^Second step/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Second standard/ }));
     fireEvent.change(screen.getByRole("textbox", { name: "Step title" }), {
       target: { value: "Edited second" },
     });
     await waitFor(
       () =>
-        expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(2),
-      { timeout: 2000 },
+        expect(
+          requests.filter((request) => request.method === "PATCH"),
+        ).toHaveLength(2),
+      { timeout: 2500 },
     );
     expect(
-      requests.find((r) => r.url === "/api/global-steps/source-one")?.body,
-    ).toMatchObject({ title: "Edited first", repeatVariableId: "list-1" });
+      requests.find((request) => request.url.includes("itemId=inherited"))
+        ?.body,
+    ).toMatchObject({ title: "Edited first", expectedVersion: 1 });
     expect(
-      requests.find((r) => r.url === "/api/global-steps/source-two")?.body,
-    ).toMatchObject({ title: "Edited second" });
+      requests.find((request) => request.url.includes("itemId=second"))?.body,
+    ).toMatchObject({ title: "Edited second", expectedVersion: 1 });
   });
-  it("opens core menus, edits template details, and exposes sign-out", async () => {
-    render(<ChecklistWorkspace initialData={data} user={user} />);
-    fireEvent.click(screen.getByRole("button", { name: "Template actions" }));
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: "Edit template details" }),
-    );
-    const dialog = await screen.findByRole("dialog", {
-      name: "Edit template details",
-    });
-    expect(dialog).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Name"), {
-      target: { value: "Renamed" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save details" }));
-    await waitFor(() =>
-      expect(
-        requests.some(
-          (r) => r.method === "PATCH" && r.body?.name === "Renamed",
-        ),
-      ).toBe(true),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Account" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
-    await waitFor(() =>
-      expect(mocks.signOut).toHaveBeenCalledWith({ redirectTo: "/" }),
+  it("switches variable/validation panels without syncing IT Glue", async () => {
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Variables" }));
+    expect(await screen.findByText(/Approved app/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Validation" }));
+    expect(await screen.findByText("Ready to create a checklist")).toBeTruthy();
+    expect(requests.some((request) => request.url.includes("/sync"))).toBe(
+      false,
     );
   });
-  it("makes viewers read-only while retaining inspection and navigation", () => {
-    render(
-      <ChecklistWorkspace
-        initialData={data}
-        user={{ ...user, role: "viewer" }}
-      />,
-    );
+  it("keeps viewer template controls read-only with the new navigation", () => {
+    render(<TemplateWorkspace initialData={workspace} user={viewer} />);
+    expect(screen.queryByRole("button", { name: "Add local step" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Local client step/ }));
     expect(
       (screen.getByRole("textbox", { name: "Step title" }) as HTMLInputElement)
         .disabled,
     ).toBe(true);
     expect(
       screen
-        .getByRole("checkbox", { name: "Repeat for a list variable" })
-        .matches(":disabled"),
-    ).toBe(true);
-    expect(screen.queryByRole("button", { name: "Add a step" })).toBeNull();
+        .getByRole("link", { name: "Global templates" })
+        .getAttribute("href"),
+    ).toBe("/global-templates");
     expect(
-      screen.getByRole("link", { name: /Global library/ }).getAttribute("href"),
-    ).toBe("/global-library");
-    fireEvent.click(screen.getByRole("button", { name: "Step 1 actions" }));
+      screen.getByRole("link", { name: "Organizations" }).getAttribute("href"),
+    ).toBe("/organizations");
     expect(
-      (screen.getByRole("menuitem", { name: "Move down" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
+      screen.getByRole("link", { name: "Checklists" }).getAttribute("href"),
+    ).toBe("/");
   });
-  it("searches library steps, links references, and protects referenced deletion", () => {
+  it("creates an organization template with a fixed parent and default inherited name", async () => {
     render(
-      <GlobalLibrary
-        initialSteps={[
-          {
-            id: "source-one",
-            title: "Shared instructions",
-            body: { type: "doc" },
-            repeatVariableId: null,
-            references: [{ id: "template-1", name: "Test template" }],
-          },
-        ]}
-        definitions={data.definitions}
+      <TemplateCatalog
+        initial={[]}
+        globals={[parent]}
         user={user}
+        organization={{ id: "org-1", name: "Client One" }}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "New organization template" }),
+    );
+    expect(
+      (screen.getByLabelText("Template name") as HTMLInputElement).value,
+    ).toBe("Standard onboarding");
+    fireEvent.click(screen.getByRole("button", { name: "Create template" }));
+    await waitFor(() =>
+      expect(mocks.push).toHaveBeenCalledWith("/templates/created-template"),
+    );
+    expect(
+      requests.find((request) => request.url === "/api/templates")?.body,
+    ).toEqual({
+      scope: "organization",
+      name: "Standard onboarding",
+      organizationId: "org-1",
+      globalTemplateId: "parent",
+    });
+  });
+  it("lets viewers browse organization templates without exposing admin management", () => {
+    render(
+      <OrganizationDirectory
+        organizations={fixture.organizations}
+        user={viewer}
       />,
     );
     expect(
-      screen.getByRole("link", { name: "Test template" }).getAttribute("href"),
-    ).toBe("/?templateId=template-1");
-    fireEvent.click(
-      screen.getByRole("button", { name: "Global step actions" }),
+      screen.getByRole("link", { name: /Client One/ }).getAttribute("href"),
+    ).toBe("/organizations/org-1");
+    expect(
+      screen.queryByRole("link", { name: "Manage IT Glue organizations" }),
+    ).toBeNull();
+  });
+});
+describe("shared runnable checklist controls", () => {
+  it("lets viewers create frozen checklists using an idempotency key", async () => {
+    render(
+      <ChecklistBoard
+        initial={{ data: [], total: 0, page: 1, pageSize: 50 }}
+        organizations={fixture.organizations}
+        templates={[child]}
+        user={viewer}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New checklist" }));
+    expect(
+      (screen.getByLabelText("Checklist name") as HTMLInputElement).value,
+    ).toBe("Client onboarding");
+    fireEvent.click(screen.getByRole("button", { name: "Create checklist" }));
+    await waitFor(() =>
+      expect(mocks.push).toHaveBeenCalledWith("/checklists/created-run"),
     );
     expect(
+      requests.find((request) => request.method === "POST")?.body,
+    ).toMatchObject({
+      templateId: "child",
+      name: "Client onboarding",
+      creationKey: expect.any(String),
+    });
+  });
+  it("lets viewers complete steps while instructions stay immutable", async () => {
+    render(<ChecklistRun initial={run} user={viewer} />);
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Complete step 1: Frozen step 1" }),
+    );
+    await waitFor(() =>
+      expect(requests.some((request) => request.method === "PATCH")).toBe(true),
+    );
+    expect(
+      requests.find((request) => request.method === "PATCH")?.body,
+    ).toEqual({ status: "completed", expectedVersion: 1 });
+    expect(screen.getByText("Frozen instructions 1")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "Step title" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Checklist actions" }),
+    ).toBeNull();
+  });
+  it("requires a skip reason and persists optional notes", async () => {
+    render(<ChecklistRun initial={run} user={viewer} />);
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Notes for step 1" }),
+      { target: { value: "Checked with client" } },
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "Skip" })[0]);
+    expect(
+      await screen.findByRole("dialog", { name: "Skip step" }),
+    ).toBeTruthy();
+    expect(
       (
-        screen.getByRole("menuitem", {
-          name: /Delete unavailable/,
+        screen.getByRole("button", {
+          name: "Save skip reason",
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(true);
-    fireEvent.change(
-      screen.getByRole("textbox", { name: "Search global steps" }),
-      { target: { value: "absent" } },
+    fireEvent.change(screen.getByLabelText("Reason for skipping"), {
+      target: { value: "Not applicable" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save skip reason" }));
+    await waitFor(() =>
+      expect(requests.some((request) => request.method === "PATCH")).toBe(true),
     );
-    expect(screen.getByText("No matching active steps.")).toBeTruthy();
+    expect(
+      requests.find((request) => request.method === "PATCH")?.body,
+    ).toMatchObject({
+      status: "skipped",
+      skipReason: "Not applicable",
+      notes: "Checked with client",
+      expectedVersion: 1,
+    });
+  });
+  it("retains draft notes on conflicts and requires explicit reconciliation", async () => {
+    forceConflict = true;
+    render(<ChecklistRun initial={run} user={viewer} />);
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Notes for step 1" }),
+      { target: { value: "My unsaved notes" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save notes" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(
+      (
+        screen.getByRole("textbox", {
+          name: "Notes for step 1",
+        }) as HTMLTextAreaElement
+      ).value,
+    ).toBe("My unsaved notes");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(
+      await screen.findByText(/This step changed while you were editing/),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Use my draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save notes" }));
+    await waitFor(() =>
+      expect(
+        requests.filter((request) => request.method === "PATCH"),
+      ).toHaveLength(2),
+    );
+    expect(
+      requests.filter((request) => request.method === "PATCH")[1].body,
+    ).toMatchObject({ notes: "My unsaved notes", expectedVersion: 2 });
+  });
+  it("flushes pending notes before navigating away", async () => {
+    render(<ChecklistRun initial={run} user={viewer} />);
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Notes for step 1" }),
+      { target: { value: "Do not lose this" } },
+    );
+    fireEvent.click(screen.getByRole("link", { name: "Global templates" }));
+    await waitFor(() =>
+      expect(mocks.push).toHaveBeenCalledWith("/global-templates"),
+    );
+    expect(
+      requests.find((request) => request.method === "PATCH")?.body,
+    ).toMatchObject({ notes: "Do not lose this", expectedVersion: 1 });
+  });
+  it("makes deleted instances read-only until administrator recovery", () => {
+    render(
+      <ChecklistRun
+        initial={{ ...run, deletedAt: new Date().toISOString() }}
+        user={{ ...user, role: "admin" }}
+      />,
+    );
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: "Complete step 1: Frozen step 1",
+        }) as HTMLInputElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      screen.getByText(/read-only until an administrator restores/),
+    ).toBeTruthy();
   });
 });

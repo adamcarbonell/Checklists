@@ -8,10 +8,30 @@ import { currentUser } from "@/lib/access";
 
 export const dynamic = "force-dynamic";
 export default async function VariablesPage() {
-  const user = await currentUser(); if (!user) redirect("/api/auth/signin?callbackUrl=/admin/variables"); if (user.role !== "admin") redirect("/");
-  const definitions = hasDatabase() ? await getDatabase().select().from(variableDefinitions).where(isNull(variableDefinitions.deletedAt)).orderBy(asc(variableDefinitions.key)) : [
-    { id: "demo-ad", key: "org.ad_full_name", label: "AD Full Name", description: "", assetTypeId: "107504", assetTypeName: "Active Directory", cardinality: "scalar" as const, selectedFields: [{ sourceKey: "ad-full-name", alias: "value", expectedKind: "Text" }], validationRules: { exactRecords: 1, requiredFields: ["value"] }, enabled: true, schemaValid: true, deletedAt: null, createdAt: new Date(), updatedAt: new Date() },
-    { id: "demo-apps", key: "org.applications", label: "Applications", description: "", assetTypeId: "107505", assetTypeName: "Applications", cardinality: "list" as const, selectedFields: [{ sourceKey: "name", alias: "name", expectedKind: "Text" }], validationRules: { minItems: 0, requiredFields: ["name"], sortBy: "name" }, enabled: true, schemaValid: true, deletedAt: null, createdAt: new Date(), updatedAt: new Date() },
-  ];
-  return <AdminShell title="Organization variables" description="Approve the exact IT Glue traits retained by the application"><VariableMappingEditor initial={definitions} /></AdminShell>;
+  const user = await currentUser();
+  if (!user) redirect("/api/auth/signin?callbackUrl=/admin/variables");
+  if (user.role !== "admin") redirect("/");
+  const available = hasDatabase();
+  const definitions = available
+    ? await getDatabase()
+        .select()
+        .from(variableDefinitions)
+        .where(isNull(variableDefinitions.deletedAt))
+        .orderBy(asc(variableDefinitions.key))
+    : [];
+  return (
+    <AdminShell
+      title="Organization variables"
+      description="Approve the exact IT Glue traits retained by the application"
+    >
+      {available ? (
+        <VariableMappingEditor initial={definitions} />
+      ) : (
+        <p className="rounded-xl border bg-amber-50 p-5 text-sm">
+          Database unavailable. No sample mappings or validation results have
+          been substituted.
+        </p>
+      )}
+    </AdminShell>
+  );
 }

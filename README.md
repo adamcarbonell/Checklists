@@ -1,45 +1,56 @@
 # Checklists
 
-Private, organization-aware checklist template authoring for Version2. Global steps are live references; organization steps are anchored snapshots. Organization variables are normalized from read-only IT Glue flexible assets and validated before preview.
+Private, organization-aware template authoring and shared checklist execution for Version2.
 
-## Included in v1
+## How it works
 
-- Next.js 16, TypeScript, PostgreSQL, Drizzle migrations, Auth.js, Microsoft Entra ID, and TipTap.
-- Admin, editor, and viewer authorization boundaries.
-- Global and organization step libraries, ordered template entries, soft deletion, revisions, restoration, and sanitized audit events.
-- Scalar tokens, list variables, repeated steps, anchor validation, and organization-specific preview blocking.
-- Seeded IT Glue mappings for `org.ad_full_name` (type `107504`) and `org.applications` (type `107505`).
-- Bounded, read-only IT Glue synchronization every six hours with a 1,000-record ceiling and last-good-value preservation.
-- Production Docker image, liveness/readiness endpoints, Northflank v1.2 GitOps template, and migration-first release flow.
+1. Editors maintain **Global templates**, each with its own standard steps.
+2. Inside an **Organization**, editors link a global template and add local, client-only steps. Inherited steps update automatically and cannot be edited in the organization template.
+3. Any enabled, signed-in user—including a viewer—starts a **Checklist** from an organization template. Instructions, variables, ordering, and repeated steps are frozen at creation.
+4. Team members complete or skip steps, add notes, and reopen work. An append-only activity history records changes. There are no assignments.
 
-Checklist execution, assignments, completion tracking, attachments, IT Glue writes, and IT Glue checklist imports are intentionally out of scope.
+Local steps belong to one organization template and are never placed in a reusable library. Removing an inherited anchor leaves its local additions visibly unplaced and blocks new checklists until repaired.
 
-## Local development
+## Included
 
-Requirements: Node.js 22, pnpm 11, and PostgreSQL 16.
+- Next.js 16, TypeScript, PostgreSQL, Drizzle, Auth.js, Microsoft Entra ID, and TipTap.
+- Live template inheritance, rich-text instructions, repetition, autosave, atomic ordering, revisions, and soft-delete recovery.
+- Approved, normalized IT Glue organization variables; freshness and validation checks shared by preview and checklist creation.
+- Atomic, idempotent frozen checklist creation; version-checked progress; required skip reasons; plain-text notes; separate completed/skipped counts.
+- Admin/editor/viewer template permissions, with checklist execution available to all enabled tenant users.
+- Read-only IT Glue synchronization every six hours, bounded retries, and a 1,000-record ceiling.
+- Production Docker image, health endpoints, and a migration-first, build-pinned Northflank release flow.
 
-```bash
-cp .env.example .env.local
+Assignments, due dates, notifications, attachments, ticket integrations, IT Glue writes, and imports are outside this version.
+
+## Development
+
+Requirements: Node.js 22, pnpm 11, PostgreSQL 16. Enter development secrets only in a local, ignored environment file; never in chat or Git. See `.env.example` for variable names.
+
+```sh
 pnpm install
-pnpm db:migrate
+# For a fresh or isolated development database only:
+pnpm db:migrate --confirm-template-reset
 pnpm db:seed
 pnpm dev
 ```
 
-Without `DATABASE_URL` and Entra settings, `pnpm dev` opens a safe in-memory design preview. Production refuses to open until Entra authentication is configured.
+The redesign migration permanently removes legacy templates, libraries, and their revisions. It requires the explicit reset flag on its first application, including in a fresh database. Do not run it against an existing deployment until the [cutover procedure](docs/DEPLOYMENT.md) is authorized and web writes are paused.
+
+Without a database, local development shows explicit empty/unavailable states, not demo organizations or successful validation. Production requires Entra authentication. Seeding creates only missing default variable definitions; it never overwrites existing mappings or creates templates.
 
 ## Commands
 
-| Command | Purpose |
-| --- | --- |
-| `pnpm dev` | Development server |
-| `pnpm build` | Production build |
-| `pnpm db:generate` | Generate Drizzle SQL from the schema |
-| `pnpm db:migrate` | Apply committed migrations |
-| `pnpm db:seed` | Upsert approved variable mappings and starter template |
-| `pnpm sync:itg` | Synchronize all enabled organizations, read-only |
-| `pnpm test` | Unit tests |
-| `pnpm typecheck` | Strict TypeScript check |
-| `pnpm validate:northflank` | Validate resource nodes against Northflank’s live schemas |
+| Command                        | Purpose                                                        |
+| ------------------------------ | -------------------------------------------------------------- |
+| `pnpm dev`                     | Development server                                             |
+| `pnpm build`                   | Production build                                               |
+| `pnpm lint` / `pnpm typecheck` | Static checks                                                  |
+| `pnpm test`                    | Unit, interface, and isolated-database integration tests       |
+| `pnpm db:generate`             | Generate Drizzle SQL                                           |
+| `pnpm db:migrate`              | Apply migrations; pending destructive reset needs confirmation |
+| `pnpm db:seed`                 | Insert missing default IT Glue mappings, without overwriting   |
+| `pnpm sync:itg`                | Read-only synchronization of enabled organizations             |
+| `pnpm validate:northflank`     | Check resource nodes against public Northflank schemas         |
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the secure Northflank and Entra bootstrap.
+See [architecture](docs/ARCHITECTURE.md) and [deployment/cutover](docs/DEPLOYMENT.md).

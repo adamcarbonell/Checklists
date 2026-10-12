@@ -2,19 +2,24 @@ import { z } from "zod";
 import { requireRole } from "@/lib/access";
 import { errorResponse, readJson } from "@/lib/input";
 import { saveOrder } from "@/lib/order-service";
-import { OrderError } from "@/lib/template-order";
-const entry = z.object({
-  itemId: z.uuid(),
-  position: z.int().min(0),
-  anchorItemId: z.uuid().nullable(),
-  placement: z.enum(["before", "after"]).nullable(),
-});
-const schema = z.object({
-  organizationId: z.uuid().nullable(),
-  movedItemId: z.uuid(),
-  expectedOrder: z.array(entry).max(1000),
-  proposedOrder: z.array(entry).max(1000),
-});
+import { loadWorkspace } from "@/lib/workspace-data";
+const entry = z
+  .object({
+    itemId: z.uuid(),
+    position: z.int().min(0),
+    anchorItemId: z.uuid().nullable(),
+    placement: z.enum(["start", "end", "before", "after"]).nullable(),
+  })
+  .strict();
+const schema = z
+  .object({
+    movedItemId: z.uuid(),
+    expectedVersion: z.int().min(1),
+    expectedParentVersion: z.int().min(1).nullable(),
+    expectedOrder: z.array(entry).max(1000),
+    proposedOrder: z.array(entry).max(1000),
+  })
+  .strict();
 export async function PATCH(
   request: Request,
   context: { params: Promise<{ id: string }> },
@@ -23,11 +28,9 @@ export async function PATCH(
   if (!access.ok) return access.response;
   try {
     const { id } = await context.params;
-    const input = await readJson(request, schema);
-    return Response.json({ data: await saveOrder(id, input, access.user.id) });
+    await saveOrder(id, await readJson(request, schema), access.user.id);
+    return Response.json({ data: await loadWorkspace(id) });
   } catch (error) {
-    if (error instanceof OrderError)
-      return Response.json({ error: error.message }, { status: error.status });
     return errorResponse(error);
   }
 }
