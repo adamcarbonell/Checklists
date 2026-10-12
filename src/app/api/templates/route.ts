@@ -5,10 +5,18 @@ import { requireRole } from "@/lib/access";
 import { recordAudit } from "@/lib/audit";
 import { errorResponse, readJson, templateCreateSchema } from "@/lib/input";
 
-export async function GET() {
+export async function GET(request: Request) {
   const access = await requireRole("viewer");
   if (!access.ok) return access.response;
-  const rows = await getDatabase().select().from(templates).where(isNull(templates.deletedAt)).orderBy(asc(templates.name));
+  const rows = await getDatabase()
+    .select()
+    .from(templates)
+    .where(
+      new URL(request.url).searchParams.get("includeDeleted") === "true"
+        ? undefined
+        : isNull(templates.deletedAt),
+    )
+    .orderBy(asc(templates.name));
   return Response.json({ data: rows });
 }
 
@@ -17,8 +25,19 @@ export async function POST(request: Request) {
   if (!access.ok) return access.response;
   try {
     const input = await readJson(request, templateCreateSchema);
-    const [created] = await getDatabase().insert(templates).values(input).returning();
-    await recordAudit({ actorUserId: access.user.id, eventType: "template.created", entityType: "template", entityId: created.id, details: { name: created.name } });
+    const [created] = await getDatabase()
+      .insert(templates)
+      .values(input)
+      .returning();
+    await recordAudit({
+      actorUserId: access.user.id,
+      eventType: "template.created",
+      entityType: "template",
+      entityId: created.id,
+      details: { name: created.name },
+    });
     return Response.json({ data: created }, { status: 201 });
-  } catch (error) { return errorResponse(error); }
+  } catch (error) {
+    return errorResponse(error);
+  }
 }

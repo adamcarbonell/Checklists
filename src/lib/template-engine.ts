@@ -1,4 +1,10 @@
-export type RichNode = { type?: string; text?: string; attrs?: Record<string, unknown>; content?: RichNode[]; [key: string]: unknown };
+export type RichNode = {
+  type?: string;
+  text?: string;
+  attrs?: Record<string, unknown>;
+  content?: RichNode[];
+  [key: string]: unknown;
+};
 
 export type GlobalTemplateItem = {
   id: string;
@@ -25,8 +31,21 @@ export type OrganizationTemplateItem = {
 
 export type TemplateItem = GlobalTemplateItem | OrganizationTemplateItem;
 export type VariableValues = Record<string, unknown>;
-export type RenderIssue = { code: "missing_anchor" | "missing_variable" | "invalid_list"; itemId: string; variableKey?: string };
-export type RenderedStep = { sourceItemId: string; title: string; body: RichNode; repeatIndex?: number };
+export type RenderIssue = {
+  code:
+    | "missing_anchor"
+    | "missing_variable"
+    | "invalid_list"
+    | "missing_source";
+  itemId: string;
+  variableKey?: string;
+};
+export type RenderedStep = {
+  sourceItemId: string;
+  title: string;
+  body: RichNode;
+  repeatIndex?: number;
+};
 
 const tokenPattern = /{{\s*([a-zA-Z0-9_.-]+)\s*}}/g;
 
@@ -34,34 +53,68 @@ export function extractVariableKeys(value: string | RichNode): string[] {
   const strings: string[] = [];
   if (typeof value === "string") strings.push(value);
   else walkRichNode(value, (text) => strings.push(text));
-  return [...new Set(strings.flatMap((text) => [...text.matchAll(tokenPattern)].map((match) => match[1])))];
+  return [
+    ...new Set(
+      strings.flatMap((text) =>
+        [...text.matchAll(tokenPattern)].map((match) => match[1]),
+      ),
+    ),
+  ];
 }
 
-export function mergeTemplateItems(items: TemplateItem[], organizationId: string): { items: TemplateItem[]; issues: RenderIssue[] } {
-  const globals = items.filter((item): item is GlobalTemplateItem => item.kind === "global" && !item.deleted).sort((a, b) => a.position - b.position);
-  const orgItems = items.filter((item): item is OrganizationTemplateItem => item.kind === "organization" && item.organizationId === organizationId && !item.deleted);
+export function mergeTemplateItems(
+  items: TemplateItem[],
+  organizationId: string,
+): { items: TemplateItem[]; issues: RenderIssue[] } {
+  const globals = items
+    .filter(
+      (item): item is GlobalTemplateItem =>
+        item.kind === "global" && !item.deleted,
+    )
+    .sort((a, b) => a.position - b.position);
+  const orgItems = items.filter(
+    (item): item is OrganizationTemplateItem =>
+      item.kind === "organization" &&
+      item.organizationId === organizationId &&
+      !item.deleted,
+  );
   const globalIds = new Set(globals.map((item) => item.id));
   const issues: RenderIssue[] = [];
   const before = new Map<string, OrganizationTemplateItem[]>();
   const after = new Map<string, OrganizationTemplateItem[]>();
 
   for (const item of orgItems) {
-    if (!item.anchorItemId || !globalIds.has(item.anchorItemId) || !item.placement) {
+    if (
+      !item.anchorItemId ||
+      !globalIds.has(item.anchorItemId) ||
+      !item.placement
+    ) {
       issues.push({ code: "missing_anchor", itemId: item.id });
       continue;
     }
     const target = item.placement === "before" ? before : after;
-    target.set(item.anchorItemId, [...(target.get(item.anchorItemId) ?? []), item]);
+    target.set(item.anchorItemId, [
+      ...(target.get(item.anchorItemId) ?? []),
+      item,
+    ]);
   }
 
   const merged: TemplateItem[] = [];
   for (const item of globals) {
-    merged.push(...(before.get(item.id) ?? []).sort((a, b) => a.position - b.position), item, ...(after.get(item.id) ?? []).sort((a, b) => a.position - b.position));
+    merged.push(
+      ...(before.get(item.id) ?? []).sort((a, b) => a.position - b.position),
+      item,
+      ...(after.get(item.id) ?? []).sort((a, b) => a.position - b.position),
+    );
   }
   return { items: merged, issues };
 }
 
-export function renderTemplate(items: TemplateItem[], organizationId: string, values: VariableValues) {
+export function renderTemplate(
+  items: TemplateItem[],
+  organizationId: string,
+  values: VariableValues,
+) {
   const merged = mergeTemplateItems(items, organizationId);
   const issues = [...merged.issues];
   const steps: RenderedStep[] = [];
@@ -71,23 +124,74 @@ export function renderTemplate(items: TemplateItem[], organizationId: string, va
     if (repeatKey) {
       const records = getPath(values, repeatKey);
       if (!Array.isArray(records)) {
-        issues.push({ code: "invalid_list", itemId: item.id, variableKey: repeatKey });
+        issues.push({
+          code: "invalid_list",
+          itemId: item.id,
+          variableKey: repeatKey,
+        });
         continue;
       }
-      records.forEach((record, index) => steps.push(renderStep(item, values, isObject(record) ? record : { value: record }, index)));
+      records.forEach((record, index) => {
+        const repeated = isObject(record) ? record : { value: record };
+        for (const key of new Set([
+          ...extractVariableKeys(item.title),
+          ...extractVariableKeys(item.body),
+        ]))
+          if (getPath({ ...values, item: repeated }, key) == null)
+            issues.push({
+              code: "missing_variable",
+              itemId: item.id,
+              variableKey: key,
+            });
+        steps.push(renderStep(item, values, repeated, index));
+      });
     } else {
-      const missing = [...extractVariableKeys(item.title), ...extractVariableKeys(item.body)]
-        .filter((key) => !key.startsWith("item.") && getPath(values, key) == null);
-      for (const key of new Set(missing)) issues.push({ code: "missing_variable", itemId: item.id, variableKey: key });
+      const missing = [
+        ...extractVariableKeys(item.title),
+        ...extractVariableKeys(item.body),
+      ].filter((key) => getPath(values, key) == null);
+      for (const key of new Set(missing))
+        issues.push({
+          code: "missing_variable",
+          itemId: item.id,
+          variableKey: key,
+        });
       steps.push(renderStep(item, values));
     }
   }
+  for (const step of steps)
+    for (const key of new Set([
+      ...extractVariableKeys(step.title),
+      ...extractVariableKeys(step.body),
+    ])) {
+      if (
+        !issues.some(
+          (issue) =>
+            issue.itemId === step.sourceItemId && issue.variableKey === key,
+        )
+      )
+        issues.push({
+          code: "missing_variable",
+          itemId: step.sourceItemId,
+          variableKey: key,
+        });
+    }
   return { steps, issues, valid: issues.length === 0 };
 }
 
-function renderStep(item: TemplateItem, values: VariableValues, repeated?: Record<string, unknown>, repeatIndex?: number): RenderedStep {
+function renderStep(
+  item: TemplateItem,
+  values: VariableValues,
+  repeated?: Record<string, unknown>,
+  repeatIndex?: number,
+): RenderedStep {
   const context = repeated ? { ...values, item: repeated } : values;
-  return { sourceItemId: item.id, title: replaceTokens(item.title, context), body: replaceRichTokens(item.body, context), repeatIndex };
+  return {
+    sourceItemId: item.id,
+    title: replaceTokens(item.title, context),
+    body: replaceRichTokens(item.body, context),
+    repeatIndex,
+  };
 }
 
 export function replaceTokens(text: string, values: VariableValues) {
@@ -98,11 +202,22 @@ export function replaceTokens(text: string, values: VariableValues) {
   });
 }
 
-export function replaceRichTokens(node: RichNode, values: VariableValues): RichNode {
+export function replaceRichTokens(
+  node: RichNode,
+  values: VariableValues,
+): RichNode {
   return {
     ...node,
-    ...(typeof node.text === "string" ? { text: replaceTokens(node.text, values) } : {}),
-    ...(node.content ? { content: node.content.map((child) => replaceRichTokens(child, values)) } : {}),
+    ...(typeof node.text === "string"
+      ? { text: replaceTokens(node.text, values) }
+      : {}),
+    ...(node.content
+      ? {
+          content: node.content.map((child) =>
+            replaceRichTokens(child, values),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -112,7 +227,12 @@ function walkRichNode(node: RichNode, visit: (text: string) => void) {
 }
 
 function getPath(values: VariableValues, path: string): unknown {
-  return path.split(".").reduce<unknown>((current, segment) => isObject(current) ? current[segment] : undefined, values);
+  return path
+    .split(".")
+    .reduce<unknown>(
+      (current, segment) => (isObject(current) ? current[segment] : undefined),
+      values,
+    );
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
