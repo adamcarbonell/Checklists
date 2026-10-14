@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   BookOpenCheck,
   ListChecks,
@@ -20,6 +21,7 @@ import type {
   VariableDefinitionSummary,
 } from "@/lib/workspace-types";
 import { SaveQueue } from "@/lib/save-queue";
+import { menuPosition } from "@/lib/menu-position";
 
 export const doc = (text: string) => ({
   type: "doc",
@@ -298,30 +300,70 @@ export function ActionMenu({
     [error, setError] = useState("");
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
+  const menu = useRef<HTMLDivElement>(null);
+  const menuId = useId();
+  useLayoutEffect(() => {
     if (!open) return;
-    const outside = (e: PointerEvent) => {
-      if (!root.current?.contains(e.target as Node)) setOpen(false);
+    const popup = menu.current, button = trigger.current;
+    if (!popup || !button) return;
+    const reposition = () => {
+      const viewport = window.visualViewport;
+      const bounds = {
+        left: viewport?.offsetLeft ?? 0,
+        top: viewport?.offsetTop ?? 0,
+        width: viewport?.width ?? (document.documentElement.clientWidth || window.innerWidth),
+        height: viewport?.height ?? window.innerHeight,
+      };
+      popup.style.maxWidth = `${Math.max(0, bounds.width - 16)}px`;
+      const position = menuPosition(button.getBoundingClientRect(), {
+        width: popup.getBoundingClientRect().width,
+        height: popup.scrollHeight,
+      }, bounds, placement);
+      popup.style.left = `${position.left}px`;
+      popup.style.top = `${position.top}px`;
+      popup.style.maxHeight = `${position.maxHeight}px`;
+      popup.style.visibility = "visible";
     };
+    const outside = (e: PointerEvent) => {
+      if (!root.current?.contains(e.target as Node) && !popup.contains(e.target as Node)) setOpen(false);
+    };
+    // Escape clipping and transformed drag rows, then measure before painting.
+    reposition();
     document.addEventListener("pointerdown", outside);
-    root.current
-      ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
-      ?.focus();
-    return () => document.removeEventListener("pointerdown", outside);
-  }, [open]);
+    window.addEventListener("resize", reposition);
+    document.addEventListener("scroll", reposition, true);
+    window.visualViewport?.addEventListener("resize", reposition);
+    window.visualViewport?.addEventListener("scroll", reposition);
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(reposition) : null;
+    observer?.observe(button);
+    observer?.observe(popup);
+    popup.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true });
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      window.removeEventListener("resize", reposition);
+      document.removeEventListener("scroll", reposition, true);
+      window.visualViewport?.removeEventListener("resize", reposition);
+      window.visualViewport?.removeEventListener("scroll", reposition);
+      observer?.disconnect();
+    };
+  }, [open, placement]);
   return (
     <div
       ref={root}
       className="relative inline-block"
       onKeyDown={(e) => {
-        if (e.key === "Escape") {
+        if (open && (e.key === "Escape" || e.key === "Tab")) {
           setOpen(false);
           trigger.current?.focus();
+          if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+          }
         }
         if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key) && open) {
           e.preventDefault();
           const items = Array.from(
-            root.current!.querySelectorAll<HTMLButtonElement>(
+            menu.current!.querySelectorAll<HTMLButtonElement>(
               '[role="menuitem"]:not(:disabled)',
             ),
           );
@@ -343,16 +385,20 @@ export function ActionMenu({
         aria-label={label}
         aria-expanded={open}
         aria-haspopup="menu"
+        aria-controls={open ? menuId : undefined}
         onClick={() => setOpen(!open)}
         className="focus-ring rounded-lg p-2 hover:bg-slate-100/20"
       >
         {icon}
       </button>
-      {open && (
+      {open && createPortal(
         <div
+          ref={menu}
+          id={menuId}
           role="menu"
           aria-label={label}
-          className={`absolute right-0 z-30 min-w-52 rounded-xl border border-slate-200 bg-white p-1 text-slate-800 shadow-xl ${placement === "up" ? "bottom-full mb-2" : "top-full mt-1"}`}
+          style={{ visibility: "hidden" }}
+          className="fixed z-50 w-52 overflow-y-auto overscroll-contain rounded-xl border border-slate-200 bg-white p-1 text-slate-800 shadow-xl"
         >
           {actions.map((a) => (
             <button
@@ -363,6 +409,7 @@ export function ActionMenu({
               onClick={() => {
                 setOpen(false);
                 setError("");
+                trigger.current?.focus({ preventScroll: true });
                 Promise.resolve(a.onClick?.()).catch((e) =>
                   setError(e.message),
                 );
@@ -371,7 +418,8 @@ export function ActionMenu({
               {a.label}
             </button>
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
       {error && (
         <span
