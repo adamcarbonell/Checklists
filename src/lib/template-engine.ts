@@ -148,11 +148,12 @@ export function renderTemplate(
           break;
         }
         const repeated = isObject(record) ? record : { value: record };
+        const context = repeatContext(values, repeatKey, repeated);
         for (const key of new Set([
           ...extractVariableKeys(item.title),
           ...extractVariableKeys(item.body),
         ]))
-          if (getPath({ ...values, item: repeated }, key) == null)
+          if (getPath(context, key) == null)
             issues.push({
               code: "missing_variable",
               itemId: item.id,
@@ -204,13 +205,33 @@ function renderStep(
   repeated?: Record<string, unknown>,
   repeatIndex?: number,
 ): RenderedStep {
-  const context = repeated ? { ...values, item: repeated } : values;
+  const context = repeated
+    ? repeatContext(values, item.repeatVariableKey!, repeated)
+    : values;
   return {
     sourceItemId: item.id,
     title: replaceTokens(item.title, context),
     body: replaceRichTokens(item.body, context),
     repeatIndex,
   };
+}
+
+// Bind only this step's repeated list to its current record. Copy each branch
+// so other steps and later repetitions still see the original list values.
+function repeatContext(
+  values: VariableValues,
+  repeatKey: string,
+  record: Record<string, unknown>,
+): VariableValues {
+  const bind = (source: VariableValues, parts: string[]): VariableValues => {
+    const [part, ...rest] = parts;
+    const child = Object.hasOwn(source, part) ? source[part] : undefined;
+    return {
+      ...source,
+      [part]: rest.length ? bind(isObject(child) ? child : {}, rest) : record,
+    };
+  };
+  return { ...bind(values, repeatKey.split(".")), item: record };
 }
 
 export function replaceTokens(text: string, values: VariableValues) {
@@ -249,7 +270,10 @@ function getPath(values: VariableValues, path: string): unknown {
   return path
     .split(".")
     .reduce<unknown>(
-      (current, segment) => (isObject(current) ? current[segment] : undefined),
+      (current, segment) =>
+        isObject(current) && Object.hasOwn(current, segment)
+          ? current[segment]
+          : undefined,
       values,
     );
 }

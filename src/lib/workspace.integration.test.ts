@@ -85,6 +85,10 @@ import {
 } from "@/app/api/templates/[id]/items/route";
 import { PATCH as orderPatch } from "@/app/api/templates/[id]/order/route";
 import { POST as restoreRevision } from "@/app/api/revisions/[id]/restore/route";
+import { PATCH as mappingPatch, POST as mappingPost } from "@/app/api/variables/route";
+import { POST as validateMapping } from "@/app/api/variables/[id]/validate/route";
+import { ItGlueClient } from "./itglue";
+import { syncOrganization } from "./sync-service";
 const client = new PGlite(),
   doc = (text: string) => ({
     type: "doc",
@@ -517,6 +521,159 @@ describe("template inheritance and local ownership", () => {
         ?.anchorItemId,
     ).toBe(first);
     expect(await rowCount(schema.revisions)).toBe(revisionCount);
+  });
+});
+describe("approved repeated fields", () => {
+  it("renders qualified and short field tokens, tracks the parent variable, and freezes only approved values", async () => {
+    await state.db.update(schema.variableDefinitions).set({ selectedFields: [
+      { sourceKey: "name", alias: "name", expectedKind: "Text" },
+      { sourceKey: "version", alias: "version", expectedKind: "Text" },
+    ] }).where(eq(schema.variableDefinitions.id, apps));
+    await state.db.update(schema.organizationVariableValues).set({ value: [
+      { id: "1", name: "Photoshop", version: "Latest", unapproved: "discard" },
+      { id: "2", name: "Acrobat", version: "2026" },
+    ] }).where(eq(schema.organizationVariableValues.definitionId, apps));
+    await changeStep(globalId, repeated, {
+      title: "Install {{org.applications.name}} {{org.applications.version}}",
+      body: doc("{{item.name}} {{item.version}} on {{org.ad_full_name}}"),
+      expectedVersion: 1,
+    }, state.actor);
+    const context = (await loadTemplateContext(childA, orgA))!;
+    expect(context.valid).toBe(true);
+    expect(context.variables.find((variable) => variable.id === apps)).toMatchObject({ used: true, fieldAliases: ["name", "version"] });
+    expect(context.steps.slice(-2).map((step) => step.title)).toEqual(["Install Photoshop Latest", "Install Acrobat 2026"]);
+    const created = await createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor);
+    const frozen = (await loadChecklist(created.id))!;
+    expect(frozen.variableSnapshot["org.applications"].value).toEqual([
+      { id: "1", name: "Photoshop", version: "Latest" },
+      { id: "2", name: "Acrobat", version: "2026" },
+    ]);
+    expect(frozen.steps.at(-1)?.body).toEqual(doc("Acrobat 2026 on client-a.local"));
+    expect(JSON.stringify(frozen)).not.toContain("discard");
+    await state.db.update(schema.organizationVariableValues).set({ value: [] }).where(eq(schema.organizationVariableValues.definitionId, apps));
+    expect((await loadChecklist(created.id))!.steps).toEqual(frozen.steps);
+  });
+  it("refuses unapproved fields even if present in stored data or if the list is empty", async () => {
+    await changeStep(globalId, repeated, {
+      title: "{{org.applications.unapproved}} {{item.version}}",
+      expectedVersion: 1,
+    }, state.actor);
+    for (const value of [[{ name: "App", unapproved: "discard", version: "Latest" }], []]) {
+      await state.db.update(schema.organizationVariableValues).set({ value }).where(eq(schema.organizationVariableValues.definitionId, apps));
+      const context = (await loadTemplateContext(childA, orgA))!;
+      expect(context.valid).toBe(false);
+      expect(context.issues).toEqual(expect.arrayContaining([
+        { code: "missing_variable", itemId: repeated, variableKey: "org.applications.unapproved" },
+        { code: "missing_variable", itemId: repeated, variableKey: "item.version" },
+      ]));
+      expect(JSON.stringify(context.variables)).not.toContain("discard");
+      await expect(createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor)).rejects.toMatchObject({ status: 409 });
+    }
+    expect(await rowCount(schema.checklists)).toBe(0);
+  });
+  it("does not let qualified field tokens bypass disabled definitions or the organization's freshness checks", async () => {
+    await changeStep(globalId, repeated, { title: "{{org.applications.name}}", expectedVersion: 1 }, state.actor);
+    await state.db.update(schema.organizationVariableValues).set({ syncedAt: new Date(Date.now() - 90000000) }).where(eq(schema.organizationVariableValues.organizationId, orgA));
+    expect((await loadTemplateContext(childA, orgA))?.invalidVariables).toContain("org.applications");
+    expect((await loadTemplateContext(childB, orgB))?.valid).toBe(true);
+    await state.db.update(schema.variableDefinitions).set({ enabled: false }).where(eq(schema.variableDefinitions.id, apps));
+    expect((await loadTemplateContext(childB, orgB))?.invalidVariables).toContain("org.applications");
+  });
+  it("requires schema validation after changing approved fields and preserves validation on label-only edits", async () => {
+    const label = await mappingPatch(request({ label: "Apps" }, "PATCH", `http://localhost/api/variables?id=${apps}`));
+    expect(label.status).toBe(200);
+    expect((await label.json()).data.schemaValid).toBe(true);
+    const changed = await mappingPatch(request({ selectedFields: [
+      { sourceKey: "name", alias: "name", expectedKind: "Text" },
+      { sourceKey: "version", alias: "version", expectedKind: "Text" },
+    ] }, "PATCH", `http://localhost/api/variables?id=${apps}`));
+    expect(changed.status).toBe(200);
+    expect((await changed.json()).data.schemaValid).toBe(false);
+    expect((await loadWorkspace(globalId))!.definitions.find((definition) => definition.id === apps)?.fieldAliases).toEqual(["name", "version"]);
+    expect((await loadTemplateContext(childA, orgA))?.valid).toBe(false);
+    // Schema review alone must not bless values synchronized under an old mapping.
+    await state.db.update(schema.variableDefinitions).set({ schemaValid: true }).where(eq(schema.variableDefinitions.id, apps));
+    const pending = (await loadTemplateContext(childA, orgA))!;
+    expect(pending.variables.find((variable) => variable.id === apps)).toMatchObject({ status: "pending", issues: ["mapping_changed_requires_sync"] });
+    expect(pending.valid).toBe(false);
+  });
+  it("rejects duplicate aliases and password/upload kinds regardless of case, and restricts mapping writes to admins", async () => {
+    for (const selectedFields of [
+      [{ sourceKey: "name", alias: "name", expectedKind: "Text" }, { sourceKey: "version", alias: "name", expectedKind: "Text" }],
+      [{ sourceKey: "password", alias: "password", expectedKind: "PASSWORD" }],
+      [{ sourceKey: "attachment", alias: "attachment", expectedKind: "upload" }],
+    ]) expect((await mappingPatch(request({ selectedFields }, "PATCH", `http://localhost/api/variables?id=${apps}`))).status).toBe(400);
+    for (const role of ["viewer", "editor"] as const) {
+      state.role = role;
+      expect((await mappingPatch(request({ label: "No" }, "PATCH", `http://localhost/api/variables?id=${apps}`))).status).toBe(403);
+    }
+    state.role = "admin";
+    const created = await mappingPost(request({ key: "org.other", label: "Other", assetTypeId: "1", assetTypeName: "Other", cardinality: "list", selectedFields: [{ sourceKey: "name", alias: "name", expectedKind: "Text" }], validationRules: {} }));
+    expect(created.status).toBe(201);
+    expect((await created.json()).data.schemaValid).toBe(false);
+  });
+  it("does not let an in-flight sync reapprove values after the mapping changes", async () => {
+    vi.stubEnv("ITGLUE_API_KEY", "test-only");
+    const reader = vi.spyOn(ItGlueClient.prototype, "getFlexibleAssets").mockImplementation(async (input) => {
+      if (input.assetTypeId === "107504") return [{ id: "ad", name: "AD", fields: { value: "example.test" } }];
+      await mappingPatch(request({ selectedFields: [
+        { sourceKey: "name", alias: "name", expectedKind: "Text" },
+        { sourceKey: "version", alias: "version", expectedKind: "Text" },
+      ] }, "PATCH", `http://localhost/api/variables?id=${apps}`));
+      return [{ id: "app", name: "App", fields: { name: "Old mapping result" } }];
+    });
+    try {
+      const result = await syncOrganization(orgA, "manual", state.actor);
+      expect(result.issues).toContain("org.applications:mapping_changed_during_sync");
+      expect((await loadTemplateContext(childA, orgA))!.variables.find((variable) => variable.id === apps)?.status).toBe("invalid");
+      const [stored] = await state.db.select().from(schema.organizationVariableValues).where(eq(schema.organizationVariableValues.definitionId, apps));
+      expect(stored.status).toBe("pending");
+      expect(JSON.stringify(stored.value)).not.toContain("Old mapping result");
+    } finally { reader.mockRestore(); vi.unstubAllEnvs(); }
+  });
+  it("returns a conflict instead of approving a mapping edited during schema validation", async () => {
+    vi.stubEnv("ITGLUE_API_KEY", "test-only");
+    await state.db.update(schema.variableDefinitions).set({ updatedAt: new Date("2000-01-01") }).where(eq(schema.variableDefinitions.id, apps));
+    const reader = vi.spyOn(ItGlueClient.prototype, "getFlexibleAssetType").mockImplementation(async (id) => {
+      await mappingPatch(request({ selectedFields: [
+        { sourceKey: "name", alias: "name", expectedKind: "Text" },
+        { sourceKey: "version", alias: "version", expectedKind: "Text" },
+      ] }, "PATCH", `http://localhost/api/variables?id=${apps}`));
+      return { id, name: "Applications", fields: [] };
+    });
+    try {
+      const result = await validateMapping(new Request("http://localhost/validate", { method: "POST" }), context(apps));
+      expect(result.status).toBe(409);
+      expect((await state.db.select().from(schema.variableDefinitions).where(eq(schema.variableDefinitions.id, apps)))[0].schemaValid).toBe(false);
+    } finally { reader.mockRestore(); vi.unstubAllEnvs(); }
+  });
+  it("validates explicitly selected Name/version traits and only reactivates values after sync", async () => {
+    vi.stubEnv("ITGLUE_API_KEY", "test-only");
+    const selectedFields = [
+      { sourceKey: "traits.name", alias: "name", expectedKind: "Text" },
+      { sourceKey: "version", alias: "version", expectedKind: "Text" },
+    ];
+    const saved = await mappingPatch(request({ selectedFields }, "PATCH", `http://localhost/api/variables?id=${apps}`));
+    expect(saved.status).toBe(200);
+    const schemaReader = vi.spyOn(ItGlueClient.prototype, "getFlexibleAssetType").mockResolvedValue({ id: "107505", name: "Applications", fields: [{ key: "name", name: "Name", kind: "Text" }, { key: "version", name: "Version", kind: "Text" }] });
+    const valueReader = vi.spyOn(ItGlueClient.prototype, "getFlexibleAssets").mockImplementation(async (input) => {
+      if (input.assetTypeId === "107504") return [{ id: "ad", name: "AD", fields: { value: "example.test" } }];
+      expect(input.selectedFields).toEqual(selectedFields);
+      return [{ id: "app", name: "Display name", fields: { name: "Application Name", version: "Latest" } }];
+    });
+    try {
+      const validated = await validateMapping(new Request("http://localhost/validate", { method: "POST" }), context(apps));
+      expect(validated.status).toBe(200);
+      expect((await validated.json()).data.schemaValid).toBe(true);
+      expect((await loadTemplateContext(childA, orgA))!.variables.find((variable) => variable.id === apps)?.status).toBe("pending");
+      expect((await syncOrganization(orgA, "manual", state.actor)).status).toBe("valid");
+      const contextAfterSync = (await loadTemplateContext(childA, orgA))!;
+      expect(contextAfterSync.valid).toBe(true);
+      expect(contextAfterSync.variables.find((variable) => variable.id === apps)?.value).toEqual([{ id: "app", name: "Application Name", version: "Latest" }]);
+      // PostgreSQL JSONB key order must not turn an unchanged save into a mapping change.
+      expect((await mappingPatch(request({ selectedFields }, "PATCH", `http://localhost/api/variables?id=${apps}`))).status).toBe(200);
+      expect((await loadTemplateContext(childA, orgA))?.valid).toBe(true);
+    } finally { schemaReader.mockRestore(); valueReader.mockRestore(); vi.unstubAllEnvs(); }
   });
 });
 describe("frozen shared checklists", () => {

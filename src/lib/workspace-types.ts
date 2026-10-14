@@ -33,6 +33,7 @@ export type VariableDefinitionSummary = {
   cardinality: "scalar" | "list";
   schemaValid: boolean;
   enabled: boolean;
+  fieldAliases: string[];
 };
 export type WorkspaceData = {
   templateId: string;

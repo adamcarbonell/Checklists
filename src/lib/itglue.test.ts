@@ -40,6 +40,17 @@ describe("IT Glue client safety", () => {
     await expect(client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields })).rejects.toBeInstanceOf(ItGlueLimitError);
   });
 
+  it("projects explicitly approved application fields without retaining other traits", async () => {
+    const preview = vi.fn(async () => undefined);
+    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: preview, fetcher: async () => Response.json({ data: [{ id: "1", attributes: { name: "Adobe Photoshop Productivity Latest", traits: { name: "Adobe Photoshop", version: "Latest", category: "Productivity", password: "discard-me" } } }] }) });
+    const fields = [{ sourceKey: "name", alias: "name", expectedKind: "Text" }, { sourceKey: "traits.name", alias: "app_name", expectedKind: "Text" }, { sourceKey: "version", alias: "version", expectedKind: "Text" }];
+    const result = await client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107505", selectedFields: fields });
+    expect(result[0].fields).toEqual({ name: "Adobe Photoshop Productivity Latest", app_name: "Adobe Photoshop", version: "Latest" });
+    expect(preview).toHaveBeenCalledWith(expect.objectContaining({ projectedFields: ["name", "traits.name", "version"] }));
+    expect(result[0].fields).not.toHaveProperty("category");
+    expect(JSON.stringify(result)).not.toMatch(/discard-me|password/);
+  });
+
   it("accepts exactly 1,000 records without a next page", async () => {
     const data = Array.from({ length: 1000 }, (_, index) => ({ id: String(index), attributes: { traits: { "ad-full-name": `domain-${index}` } } }));
     const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: async () => undefined, fetcher: async () => new Response(JSON.stringify({ data, meta: { "total-count": 1000 } }), { status: 200 }) });

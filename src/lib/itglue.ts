@@ -131,10 +131,16 @@ function projectAsset(resource: JsonApiResource, fields: SelectedField[]): Proje
   const traits = isObject(attributes.traits) ? attributes.traits : {};
   const projected: Record<string, unknown> = {};
   for (const field of fields) {
-    const raw = field.sourceKey === "name" ? attributes.name : traits[field.sourceKey];
+    const raw = field.sourceKey === "name" ? attributes.name : traits[flexibleAssetTraitKey(field.sourceKey)];
     projected[field.alias] = normalizeTrait(raw);
   }
   return { id: resource.id, name: String(attributes.name ?? resource.id), updatedAt: typeof attributes["updated-at"] === "string" ? attributes["updated-at"] : undefined, fields: projected };
+}
+
+// Keep the legacy display-name mapping; allow an explicit trait with the same
+// name to be approved independently without silently changing existing values.
+export function flexibleAssetTraitKey(sourceKey: string) {
+  return sourceKey.startsWith("traits.") ? sourceKey.slice(7) : sourceKey;
 }
 
 function normalizeTrait(value: unknown): unknown {

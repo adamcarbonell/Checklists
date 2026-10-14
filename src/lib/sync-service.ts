@@ -3,6 +3,7 @@ import { auditEvents, organizationVariableValues, organizations, syncRuns, varia
 import { getDatabase } from "@/db/client";
 import { ItGlueClient, ItGlueLimitError, type RequestPreview } from "./itglue";
 import { resolveVariable } from "./variable-validation";
+import { hasMappingChanges } from "./variable-mapping";
 
 export async function syncOrganization(organizationId: string, trigger: "manual" | "cron", actorUserId?: string) {
   const db = getDatabase();
@@ -32,13 +33,19 @@ export async function syncOrganization(organizationId: string, trigger: "manual"
       for (const definition of typeDefinitions) {
         const resolution = resolveVariable({ key: definition.key, cardinality: definition.cardinality, selectedFields: definition.selectedFields, validationRules: definition.validationRules }, assets);
         const now = new Date();
-        if (resolution.status === "valid") {
-          await db.insert(organizationVariableValues).values({ organizationId, definitionId: definition.id, value: resolution.value, status: "valid", issues: [], sourceUpdatedAt: resolution.sourceUpdatedAt, syncedAt: now, lastGoodAt: now })
-            .onConflictDoUpdate({ target: [organizationVariableValues.organizationId, organizationVariableValues.definitionId], set: { value: resolution.value, status: "valid", issues: [], sourceUpdatedAt: resolution.sourceUpdatedAt, syncedAt: now, lastGoodAt: now, updatedAt: now } });
-        } else {
-          await db.insert(organizationVariableValues).values({ organizationId, definitionId: definition.id, status: resolution.status, issues: resolution.issues, sourceUpdatedAt: resolution.sourceUpdatedAt, syncedAt: now })
-            .onConflictDoUpdate({ target: [organizationVariableValues.organizationId, organizationVariableValues.definitionId], set: { status: resolution.status, issues: resolution.issues, sourceUpdatedAt: resolution.sourceUpdatedAt, syncedAt: now, updatedAt: now } });
-        }
+        const saved = await db.transaction(async (tx) => {
+          const [current] = await tx.select().from(variableDefinitions).where(eq(variableDefinitions.id, definition.id)).for("update");
+          if (!current || !current.enabled || !current.schemaValid || current.deletedAt || hasMappingChanges(definition, current)) return false;
+          if (resolution.status === "valid") {
+            await tx.insert(organizationVariableValues).values({ organizationId, definitionId: definition.id, value: resolution.value, status: "valid", issues: [], sourceUpdatedAt: resolution.sourceUpdatedAt, syncedAt: now, lastGoodAt: now })
+              .onConflictDoUpdate({ target: [organizationVariableValues.organizationId, organizationVariableValues.definitionId], set: { value: resolution.value, status: "valid", issues: [], sourceUpdatedAt: resolution.sourceUpdatedAt, syncedAt: now, lastGoodAt: now, updatedAt: now } });
+          } else {
+            await tx.insert(organizationVariableValues).values({ organizationId, definitionId: definition.id, status: resolution.status, issues: resolution.issues, sourceUpdatedAt: resolution.sourceUpdatedAt, syncedAt: now })
+              .onConflictDoUpdate({ target: [organizationVariableValues.organizationId, organizationVariableValues.definitionId], set: { status: resolution.status, issues: resolution.issues, sourceUpdatedAt: resolution.sourceUpdatedAt, syncedAt: now, updatedAt: now } });
+          }
+          return true;
+        });
+        if (!saved) issues.push(`${definition.key}:mapping_changed_during_sync`);
         issues.push(...resolution.issues.map((issue) => `${definition.key}:${issue}`));
       }
     } catch (error) {

@@ -3,8 +3,9 @@ import { getDatabase } from "@/db/client";
 import { variableDefinitions } from "@/db/schema";
 import { requireRole } from "@/lib/access";
 import { recordAudit } from "@/lib/audit";
-import { ItGlueClient } from "@/lib/itglue";
+import { flexibleAssetTraitKey, ItGlueClient } from "@/lib/itglue";
 import { errorResponse } from "@/lib/input";
+import { hasMappingChanges } from "@/lib/variable-mapping";
 
 export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
   const access = await requireRole("admin"); if (!access.ok) return access.response;
@@ -18,15 +19,21 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     const fieldMap = new Map(assetType.fields.map((field) => [field.key, field]));
     const issues = definition.selectedFields.flatMap((selected) => {
       if (selected.sourceKey === "name") return selected.expectedKind.toLowerCase() === "text" ? [] : ["kind_mismatch:name"];
-      const field = fieldMap.get(selected.sourceKey);
+      const field = fieldMap.get(flexibleAssetTraitKey(selected.sourceKey));
       if (!field) return [`missing_field:${selected.sourceKey}`];
       if (["password", "upload"].includes(field.kind.toLowerCase())) return [`disallowed_field_kind:${selected.sourceKey}`];
       if (field.kind && field.kind.toLowerCase() !== selected.expectedKind.toLowerCase()) return [`kind_mismatch:${selected.sourceKey}`];
       return [];
     });
     const schemaValid = issues.length === 0;
-    await db.update(variableDefinitions).set({ schemaValid, updatedAt: new Date() }).where(eq(variableDefinitions.id, id));
-    await recordAudit({ actorUserId: access.user.id, eventType: "variable_definition.schema_validated", entityType: "variable_definition", entityId: id, details: { assetTypeId: definition.assetTypeId, selectedFieldKeys: definition.selectedFields.map((field) => field.sourceKey), schemaValid, issues } });
+    const validated = await db.transaction(async (tx) => {
+      const [current] = await tx.select().from(variableDefinitions).where(eq(variableDefinitions.id, id)).for("update");
+      if (!current || current.deletedAt || hasMappingChanges(definition, current)) return false;
+      await tx.update(variableDefinitions).set({ schemaValid, updatedAt: new Date() }).where(eq(variableDefinitions.id, id));
+      await recordAudit({ actorUserId: access.user.id, eventType: "variable_definition.schema_validated", entityType: "variable_definition", entityId: id, details: { assetTypeId: definition.assetTypeId, selectedFieldKeys: definition.selectedFields.map((field) => field.sourceKey), schemaValid, issues } }, tx);
+      return true;
+    });
+    if (!validated) return Response.json({ error: "mapping_changed_retry_validation" }, { status: 409 });
     return Response.json({ data: { schemaValid, issues, assetType: { id: assetType.id, name: assetType.name } } });
   } catch (error) { return errorResponse(error); }
 }

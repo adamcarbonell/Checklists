@@ -11,6 +11,14 @@ Private, organization-aware template authoring and shared checklist execution fo
 
 Local steps belong to one organization template and are never placed in a reusable library. Removing an inherited anchor leaves its local additions visibly unplaced and blocks new checklists until repaired.
 
+### Application fields in repeated steps
+
+Enable **Repeat for a list variable** and select **Applications**. In that step's title or instructions, use `{{org.applications.name}}` (or the equivalent `{{item.name}}`). Each rendered step receives the current application's field, not the entire list. The editor's **Variable** picker lists the approved fields for the selected repeat list.
+
+For version information, an administrator first adds its exact IT Glue field key under **Variables → Applications → Add approved field**, using the lowercase alias `version` and the correct expected kind. Save the mapping, validate the saved schema, and sync the organization. Then use `{{org.applications.version}}` or `{{item.version}}`. Aliases are case-sensitive: `Version` and `version` are different. The built-in source key `name` refers to the asset display name, not a separate Name trait. If the actual trait's key is `name`, explicitly map `traits.name` to select it instead; existing display-name mappings are not changed automatically.
+
+Only explicitly approved fields are retained and exposed. New fields are not enabled by this release; no existing mapping is overwritten. List-field tokens outside a step repeating that list, missing fields, invalid schemas, and stale values block new checklist creation. Existing runnable checklists remain frozen.
+
 ## Included
 
 - Next.js 16, TypeScript, PostgreSQL, Drizzle, Auth.js, Microsoft Entra ID, and TipTap.

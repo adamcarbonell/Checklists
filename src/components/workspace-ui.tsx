@@ -452,7 +452,7 @@ export function Modal({
       ref={ref}
       aria-label={title}
       onCancel={onClose}
-      className="max-h-[90vh] w-[min(92vw,760px)] rounded-2xl border border-slate-200 bg-[#fffef9] p-0 shadow-2xl backdrop:bg-[#102d2a]/55"
+      className="fixed inset-0 m-auto h-fit max-h-[90dvh] w-[min(92vw,760px)] overflow-y-auto rounded-2xl border border-slate-200 bg-[#fffef9] p-0 shadow-2xl backdrop:bg-[#102d2a]/55"
     >
       <div className="flex items-center justify-between border-b p-5">
         <h2 className="font-semibold">{title}</h2>

@@ -72,7 +72,7 @@ export async function loadTemplates(
   }));
 }
 export async function loadDefinitions(db: Reader = getDatabase()) {
-  return db
+  const definitions = await db
     .select({
       id: variableDefinitions.id,
       key: variableDefinitions.key,
@@ -80,11 +80,16 @@ export async function loadDefinitions(db: Reader = getDatabase()) {
       cardinality: variableDefinitions.cardinality,
       schemaValid: variableDefinitions.schemaValid,
       enabled: variableDefinitions.enabled,
+      selectedFields: variableDefinitions.selectedFields,
     })
     .from(variableDefinitions)
     .where(isNull(variableDefinitions.deletedAt))
     .orderBy(asc(variableDefinitions.key))
     .limit(1000);
+  return definitions.map(({ selectedFields, ...definition }) => ({
+    ...definition,
+    fieldAliases: selectedFields.map((field) => field.alias),
+  }));
 }
 export async function loadWorkspace(
   templateId: string,
@@ -193,19 +198,6 @@ export async function loadTemplateContext(
     .from(organizationVariableValues)
     .where(eq(organizationVariableValues.organizationId, organizationId));
   const byDefinition = new Map(stored.map((row) => [row.definitionId, row]));
-  const approved = await db
-    .select({
-      id: variableDefinitions.id,
-      fields: variableDefinitions.selectedFields,
-    })
-    .from(variableDefinitions)
-    .where(isNull(variableDefinitions.deletedAt));
-  const fields = new Map(
-    approved.map((definition) => [
-      definition.id,
-      definition.fields.map((field) => field.alias),
-    ]),
-  );
   const usedKeys = new Set(
     workspace.steps
       .flatMap((step) => [
@@ -213,7 +205,13 @@ export async function loadTemplateContext(
         ...extractVariableKeys(step.body),
         ...(step.repeat ? [step.repeat] : []),
       ])
-      .filter((key) => !key.startsWith("item.")),
+      .filter((key) => !key.startsWith("item."))
+      .map((key) =>
+        workspace.definitions.find(
+          (definition) =>
+            key === definition.key || key.startsWith(`${definition.key}.`),
+        )?.key ?? key,
+      ),
   );
   const variables: ContextVariable[] = workspace.definitions.map(
     (definition) => {
@@ -236,7 +234,7 @@ export async function loadTemplateContext(
             : projectValue(
                 row?.value ?? null,
                 definition.cardinality,
-                fields.get(definition.id) ?? [],
+                definition.fieldAliases,
               ),
         status:
           !definition.enabled ||
@@ -288,6 +286,32 @@ export async function loadTemplateContext(
         },
   );
   const rendered = renderTemplate(items, organizationId, values);
+  // Validate field references against the approved mapping even when a list is
+  // empty. No record lookup can prove that an unknown alias is permitted.
+  const fieldIssues = workspace.steps.flatMap((step) => {
+    const repeated = workspace.definitions.find(
+      (definition) => definition.id === step.repeatVariableId,
+    );
+    return [...new Set([
+      ...extractVariableKeys(step.title),
+      ...extractVariableKeys(step.body),
+    ])].flatMap((key) => {
+      const definition = key.startsWith("item.")
+        ? repeated
+        : workspace.definitions.find(
+            (definition) =>
+              definition.cardinality === "list" &&
+              key.startsWith(`${definition.key}.`),
+          );
+      if (!definition && !key.startsWith("item.")) return [];
+      const alias = key.slice(key.startsWith("item.") ? 5 : definition!.key.length + 1);
+      return definition?.cardinality === "list" &&
+        repeated?.id === definition.id &&
+        (definition.fieldAliases.includes(alias) || alias === "id")
+        ? []
+        : [{ code: "missing_variable" as const, itemId: step.id, variableKey: key }];
+    });
+  });
   const invalidVariables = [
     ...new Set([
       ...variables
@@ -300,6 +324,9 @@ export async function loadTemplateContext(
   ];
   const issues = [
     ...rendered.issues,
+    ...fieldIssues.filter((issue) => !rendered.issues.some(
+      (existing) => existing.itemId === issue.itemId && existing.variableKey === issue.variableKey,
+    )),
     ...(!rendered.steps.length
       ? [{ code: "empty_checklist" as const, itemId: templateId }]
       : []),

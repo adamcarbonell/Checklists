@@ -100,6 +100,7 @@ const fixture: WorkspaceData = {
       cardinality: "list",
       enabled: true,
       schemaValid: true,
+      fieldAliases: ["name", "version"],
     },
   ],
   steps: [
@@ -422,6 +423,37 @@ describe("new template authoring", () => {
     expect(requests.some((request) => request.url.includes("/sync"))).toBe(
       false,
     );
+  });
+  it("shows approved per-record tokens after selecting Applications and saves an inserted field", async () => {
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Local client step/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Repeat for a list variable" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Repeat list variable" }), { target: { value: "list" } });
+    expect(screen.getByText("{{org.applications.name}}")).toBeTruthy();
+    expect(screen.getByText("{{org.applications.version}}")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Variable" }));
+    expect(screen.getByRole("region", { name: "Repeated item fields" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "{{org.applications.version}}" }));
+    await waitFor(() => expect(requests.some((request) => request.method === "PATCH")).toBe(true), { timeout: 2500 });
+    const saved = requests.find((request) => request.method === "PATCH")!;
+    expect(saved.body?.repeatVariableId).toBe("list");
+    expect(JSON.stringify(saved.body?.body)).toContain("{{org.applications.version}}");
+    expect(screen.queryByRole("dialog", { name: "Insert variable" })).toBeNull();
+    expect(requests.some((request) => request.url.includes("/sync"))).toBe(false);
+  });
+  it("does not offer list fields before repetition is enabled, or editing controls for viewers", () => {
+    const { unmount } = render(<TemplateWorkspace initialData={workspace} user={user} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Local client step/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Variable" }));
+    expect(screen.queryByRole("region", { name: "Repeated item fields" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "{{org.applications}}" })).toBeNull();
+    expect(screen.getByText(/select Applications first/)).toBeTruthy();
+    unmount();
+    workspace.steps[1].repeatVariableId = "list";
+    render(<TemplateWorkspace initialData={workspace} user={viewer} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Local client step/ }));
+    expect(screen.getByText("{{org.applications.version}}")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Variable" })).toBeNull();
   });
   it("keeps viewer template controls read-only with the new navigation", () => {
     render(<TemplateWorkspace initialData={workspace} user={viewer} />);

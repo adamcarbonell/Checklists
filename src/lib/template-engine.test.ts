@@ -24,4 +24,37 @@ describe("template engine", () => {
     expect(rendered.valid).toBe(true);
     expect(rendered.steps.map((step) => step.title)).toEqual(["Domain acme.local", "Review Adobe", "Review M365"]);
   });
+
+  it("resolves qualified list fields and item aliases in titles and rich text without mutating the source", () => {
+    const values = { org: { ad_full_name: "acme.local", applications: [
+      { name: "Photoshop", version: "Latest", count: 0, enabled: false },
+      { name: "Acrobat", version: "2026", count: 1, enabled: true },
+    ] } };
+    const before = structuredClone(values);
+    const repeated: TemplateItem = { ...globals[1], title: "Install {{org.applications.name}} {{item.version}}", body: body("{{org.applications.version}} / {{item.name}} / {{org.ad_full_name}} / {{org.applications.count}} / {{item.enabled}}") };
+    const result = renderTemplate([repeated], "org-1", values);
+    expect(result.valid).toBe(true);
+    expect(result.steps.map((step) => step.title)).toEqual(["Install Photoshop Latest", "Install Acrobat 2026"]);
+    expect(result.steps[0].body).toEqual(body("Latest / Photoshop / acme.local / 0 / false"));
+    expect(result.steps[1].body).toEqual(body("2026 / Acrobat / acme.local / 1 / true"));
+    expect(values).toEqual(before);
+  });
+
+  it("does not leak repeat bindings into nonrepeated steps or another list", () => {
+    const result = renderTemplate([
+      { ...globals[1], title: "{{org.applications.name}}" },
+      { ...globals[0], id: "outside", position: 30, title: "{{org.applications.name}}" },
+      { ...globals[1], id: "other", position: 40, repeatVariableKey: "org.other", title: "{{org.applications.name}} {{item.name}}" },
+    ], "org-1", { org: { applications: [{ name: "Photoshop" }], other: [{ name: "Other" }] } });
+    expect(result.steps[0].title).toBe("Photoshop");
+    expect(result.steps[1].title).toBe("{{org.applications.name}}");
+    expect(result.steps[2].title).toBe("{{org.applications.name}} Other");
+    expect(result.issues.filter((issue) => issue.variableKey === "org.applications.name").map((issue) => issue.itemId)).toEqual(["outside", "other"]);
+  });
+
+  it("rejects missing fields, case mismatches, objects, and prototype properties", () => {
+    const result = renderTemplate([{ ...globals[1], title: "{{org.applications.Version}} {{item.missing}} {{item.constructor}} {{item.details}}" }], "org-1", { org: { applications: [{ name: "App", version: "Latest", details: {} }] } });
+    expect(result.valid).toBe(false);
+    expect(result.issues.map((issue) => issue.variableKey)).toEqual(expect.arrayContaining(["org.applications.Version", "item.missing", "item.constructor", "item.details"]));
+  });
 });

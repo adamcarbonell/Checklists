@@ -19,13 +19,13 @@ import {
 import { SaveQueue } from "@/lib/save-queue";
 import { RichTextEditor } from "./rich-text-editor";
 import { RichInstructions } from "./rich-instructions";
+import { RepeatedFieldHelp, VariableTokenPicker } from "./variable-token-picker";
 import {
   WorkspaceShell,
   ActionMenu,
   Modal,
   HistoryDialog,
   RepeatControl,
-  TextPrompt,
   api,
   doc,
   textOf,
@@ -850,6 +850,11 @@ export function TemplateWorkspace({
                 disabled={!owned}
                 onChange={(repeatVariableId) => update({ repeatVariableId })}
               />
+              <RepeatedFieldHelp
+                definition={data.definitions.find(
+                  (definition) => definition.id === selected.repeatVariableId,
+                )}
+              />
               <p className="rounded-xl border p-3 text-xs">
                 {selected.inherited
                   ? "Live inheritance: global changes flow into this org template."
@@ -916,16 +921,11 @@ export function TemplateWorkspace({
         </aside>
       </div>
       {variable && selected && owned && (
-        <TextPrompt
-          title="Insert variable"
-          label="Variable token"
-          initialValue={data.definitions[0]?.key ?? "org.ad_full_name"}
-          suggestions={data.definitions
-            .filter((entry) => entry.enabled)
-            .map((entry) => entry.key)}
-          submitLabel="Insert variable"
+        <VariableTokenPicker
+          definitions={data.definitions}
+          repeatVariableId={selected.repeatVariableId}
           onClose={() => setVariable(false)}
-          onSubmit={(key) => {
+          onInsert={(key) => {
             update({
               body: {
                 ...selected.body,
