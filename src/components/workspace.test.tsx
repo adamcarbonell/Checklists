@@ -101,6 +101,7 @@ const fixture: WorkspaceData = {
       enabled: true,
       schemaValid: true,
       fieldAliases: ["name", "version"],
+      requiredFieldAliases: ["name"],
     },
   ],
   steps: [
@@ -208,6 +209,7 @@ const runFixture: ChecklistDetail = {
   })),
 };
 let workspace: WorkspaceData,
+  currentContext: TemplateContext,
   run: ChecklistDetail,
   requests: {
     url: string;
@@ -218,6 +220,7 @@ let workspace: WorkspaceData,
 beforeEach(() => {
   vi.clearAllMocks();
   workspace = structuredClone(fixture);
+  currentContext = structuredClone(templateContext);
   run = structuredClone(runFixture);
   requests = [];
   forceConflict = false;
@@ -244,7 +247,11 @@ beforeEach(() => {
         let result: unknown = { data: [] };
         if (url.includes("/workspace"))
           result = { data: structuredClone(workspace) };
-        else if (url.includes("/context?")) result = { data: templateContext };
+        else if (url.includes("/context?")) result = { data: structuredClone(currentContext) };
+        else if (url === "/api/organizations/org-1/sync" && method === "POST") {
+          currentContext = structuredClone(templateContext);
+          result = { data: { status: "valid" } };
+        }
         else if (url.includes("/items") && method === "PATCH") {
           const id = new URL(url, "http://local").searchParams.get("itemId")!;
           workspace.version++;
@@ -440,6 +447,36 @@ describe("new template authoring", () => {
     expect(JSON.stringify(saved.body?.body)).toContain("{{org.applications.version}}");
     expect(screen.queryByRole("dialog", { name: "Insert variable" })).toBeNull();
     expect(requests.some((request) => request.url.includes("/sync"))).toBe(false);
+  });
+  it("explains pending mapped values without 59 duplicate errors and lets only an admin explicitly refresh them", async () => {
+    currentContext.valid = false;
+    currentContext.invalidVariables = ["org.applications"];
+    currentContext.variables[0].status = "pending";
+    currentContext.variables[0].issues = ["mapping_changed_requires_sync"];
+    currentContext.issues = Array.from({ length: 59 }, () => ({ code: "missing_variable", itemId: "inherited", variableKey: "org.applications.version" }));
+    render(<TemplateWorkspace initialData={workspace} user={{ ...user, role: "admin" }} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Validation" }));
+    expect(await screen.findByText(/Schema validation checks the field definitions/)).toBeTruthy();
+    expect(screen.queryByText(/missing_variable/)).toBeNull();
+    expect(requests.some((request) => request.url.endsWith("/sync"))).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh organization data" }));
+    expect(await screen.findByText("Ready to create a checklist")).toBeTruthy();
+    expect(requests.filter((request) => request.url.endsWith("/sync"))).toEqual([{ url: "/api/organizations/org-1/sync", method: "POST", body: null }]);
+  });
+  it("reloads stored context when returning to the tab without initiating an IT Glue sync", async () => {
+    currentContext.valid = false;
+    currentContext.invalidVariables = ["org.applications"];
+    currentContext.variables[0].status = "pending";
+    currentContext.variables[0].issues = ["mapping_changed_requires_sync"];
+    render(<TemplateWorkspace initialData={workspace} user={viewer} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Validation" }));
+    expect(await screen.findByText(/Schema validation checks the field definitions/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Refresh organization data" })).toBeNull();
+    currentContext = structuredClone(templateContext);
+    fireEvent.click(screen.getByRole("tab", { name: "Canvas" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Validation" }));
+    expect(await screen.findByText("Ready to create a checklist")).toBeTruthy();
+    expect(requests.some((request) => request.url.endsWith("/sync"))).toBe(false);
   });
   it("does not offer list fields before repetition is enabled, or editing controls for viewers", () => {
     const { unmount } = render(<TemplateWorkspace initialData={workspace} user={user} />);

@@ -137,12 +137,16 @@ export function VariableMappingEditor({ initial }: { initial: Definition[] }) {
                       <code className="break-all text-xs text-teal-800">{`{{${definition.cardinality === "list" || definition.selectedFields.length > 1 ? `${definition.key}.${field.alias || "field"}` : definition.key}}}`}</code>
                       <button type="button" disabled={definition.selectedFields.length === 1} onClick={() => update(definition.id, { selectedFields: definition.selectedFields.filter((_, position) => position !== index) })} className="rounded-lg border px-3 py-1 text-xs disabled:opacity-40" aria-label={`Remove approved field ${label}`}>Remove field</button>
                     </div>
+                    {definition.key === "org.applications" && field.alias === "version" && (
+                      <p className="mt-2 text-xs text-slate-600">{definition.validationRules.requiredFields?.includes("version") ? "Required: blank versions block checklist creation." : "Optional: blank versions render as “Not specified” after a valid refresh."}</p>
+                    )}
                   </div>
                 );
               })}
             </div>
             <button type="button" disabled={definition.selectedFields.length >= 50} onClick={() => update(definition.id, { selectedFields: [...definition.selectedFields, { sourceKey: "", alias: "", expectedKind: "Text" }] })} className="mt-3 inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs disabled:opacity-40"><Plus size={14} /> Add approved field</button>
             <p className="mt-3 text-xs text-slate-600">Adding a row does not change the saved mapping. Save to approve the exact fields, validate the saved schema, then manually sync the organization. List-field tokens require a step repeating that list. Removing an alias may invalidate existing templates.</p>
+            <a href="/admin/organizations" className="mt-2 inline-block text-xs text-teal-800 underline">Open organizations to refresh approved data</a>
             <div className="mt-5 flex flex-wrap items-center justify-end gap-3">
               <span role="status" className="mr-auto text-xs text-slate-600">{status[definition.id]}</span>
               <button type="button" disabled={dirty[definition.id]} onClick={() => validate(definition)} className="rounded-xl border border-teal-200 px-4 py-2 text-xs font-semibold text-teal-800 disabled:opacity-40">Validate schema</button>

@@ -25,7 +25,7 @@ export function resolveVariable(definition: VariableDefinitionInput, assets: Pro
     }
     for (const field of required) {
       const value = asset.fields[field];
-      if (value == null || value === "") issues.push(`record_${asset.id}_missing_${field}`);
+      if (value == null || (typeof value === "string" && !value.trim())) issues.push(`record_${asset.id}_missing_${field}`);
     }
   }
 

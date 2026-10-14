@@ -24,6 +24,9 @@ export function RepeatedFieldHelp({
       <p className="mt-2">
         {"The short form {{item.field}} also works. Only approved fields are available; an administrator must map, validate, and sync additional fields such as version in Organization variables."}
       </p>
+      {definition.key === "org.applications" && definition.fieldAliases.includes("version") && !definition.requiredFieldAliases?.includes("version") && (
+        <p className="mt-2">An approved optional Version that is blank renders as “Not specified”. Required fields still block creation.</p>
+      )}
     </div>
   );
 }

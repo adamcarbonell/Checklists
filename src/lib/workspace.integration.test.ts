@@ -87,6 +87,7 @@ import { PATCH as orderPatch } from "@/app/api/templates/[id]/order/route";
 import { POST as restoreRevision } from "@/app/api/revisions/[id]/restore/route";
 import { PATCH as mappingPatch, POST as mappingPost } from "@/app/api/variables/route";
 import { POST as validateMapping } from "@/app/api/variables/[id]/validate/route";
+import { POST as syncRoute } from "@/app/api/organizations/[id]/sync/route";
 import { ItGlueClient } from "./itglue";
 import { syncOrganization } from "./sync-service";
 const client = new PGlite(),
@@ -524,6 +525,34 @@ describe("template inheritance and local ownership", () => {
   });
 });
 describe("approved repeated fields", () => {
+  it("renders blank optional Version as Not specified only after approval and fresh sync; snapshots keep the actual null", async () => {
+    await changeStep(globalId, repeated, { title: "Install {{org.applications.name}}", body: doc("Version {{org.applications.version}} / {{item.version}}"), expectedVersion: 1 }, state.actor);
+    await state.db.update(schema.organizationVariableValues).set({ value: [{ id: "1", name: "One", version: null }, { id: "2", name: "Two", version: "Latest" }] }).where(eq(schema.organizationVariableValues.definitionId, apps));
+    expect((await loadTemplateContext(childA, orgA))?.valid).toBe(false);
+    await state.db.update(schema.variableDefinitions).set({ selectedFields: [{ sourceKey: "name", alias: "name", expectedKind: "Text" }, { sourceKey: "version", alias: "version", expectedKind: "Text" }] }).where(eq(schema.variableDefinitions.id, apps));
+    const ready = (await loadTemplateContext(childA, orgA))!;
+    expect(ready.valid).toBe(true);
+    expect(ready.steps.at(-2)?.body).toEqual(doc("Version Not specified / Not specified"));
+    expect(ready.steps.at(-1)?.body).toEqual(doc("Version Latest / Latest"));
+    const created = await createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor);
+    const frozen = (await loadChecklist(created.id))!;
+    expect(frozen.variableSnapshot["org.applications"].value).toEqual([{ id: "1", name: "One", version: null }, { id: "2", name: "Two", version: "Latest" }]);
+    expect(frozen.steps.at(-2)?.body).toEqual(doc("Version Not specified / Not specified"));
+    await state.db.update(schema.variableDefinitions).set({ validationRules: { requiredFields: ["name", "version"] } }).where(eq(schema.variableDefinitions.id, apps));
+    expect((await loadTemplateContext(childA, orgA))?.valid).toBe(false);
+    await expect(createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor)).rejects.toMatchObject({ status: 409 });
+    await state.db.update(schema.variableDefinitions).set({ validationRules: { requiredFields: ["name"] } }).where(eq(schema.variableDefinitions.id, apps));
+    await state.db.update(schema.organizationVariableValues).set({ status: "pending", issues: ["mapping_changed_requires_sync"] }).where(eq(schema.organizationVariableValues.definitionId, apps));
+    const pending = (await loadTemplateContext(childA, orgA))!;
+    expect(pending.valid).toBe(false);
+    expect(pending.steps.at(-2)?.body).toEqual(doc("Version {{org.applications.version}} / {{item.version}}"));
+  });
+  it("keeps the explicit organization refresh endpoint restricted to administrators", async () => {
+    for (const role of ["viewer", "editor"] as const) {
+      state.role = role;
+      expect((await syncRoute(new Request("http://localhost/sync", { method: "POST" }), context(orgA))).status).toBe(403);
+    }
+  });
   it("renders qualified and short field tokens, tracks the parent variable, and freezes only approved values", async () => {
     await state.db.update(schema.variableDefinitions).set({ selectedFields: [
       { sourceKey: "name", alias: "name", expectedKind: "Text" },

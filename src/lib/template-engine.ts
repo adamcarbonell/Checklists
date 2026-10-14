@@ -31,6 +31,9 @@ export type OrganizationTemplateItem = {
 
 export type TemplateItem = GlobalTemplateItem | OrganizationTemplateItem;
 export type VariableValues = Record<string, unknown>;
+export type RenderOptions = {
+  optionalFieldFallbacks?: Record<string, Record<string, string>>;
+};
 export type RenderIssue = {
   code:
     | "missing_anchor"
@@ -41,6 +44,7 @@ export type RenderIssue = {
     | "missing_source";
   itemId: string;
   variableKey?: string;
+  occurrences?: number;
 };
 export type RenderedStep = {
   sourceItemId: string;
@@ -125,6 +129,7 @@ export function renderTemplate(
   items: TemplateItem[],
   organizationId: string,
   values: VariableValues,
+  options: RenderOptions = {},
 ) {
   const merged = mergeTemplateItems(items, organizationId);
   const issues = [...merged.issues];
@@ -147,7 +152,12 @@ export function renderTemplate(
           issues.push({ code: "too_many_steps", itemId: item.id });
           break;
         }
-        const repeated = isObject(record) ? record : { value: record };
+        const repeated: Record<string, unknown> = { ...(isObject(record) ? record : { value: record }) };
+        for (const [field, fallback] of Object.entries(options.optionalFieldFallbacks?.[repeatKey] ?? {})) {
+          const value = Object.hasOwn(repeated, field) ? repeated[field] : undefined;
+          if (value == null || (typeof value === "string" && !value.trim()))
+            repeated[field] = fallback;
+        }
         const context = repeatContext(values, repeatKey, repeated);
         for (const key of new Set([
           ...extractVariableKeys(item.title),
@@ -196,7 +206,19 @@ export function renderTemplate(
           variableKey: key,
         });
     }
-  return { steps, issues, valid: issues.length === 0 };
+  return { steps, issues: summarizeRenderIssues(issues), valid: issues.length === 0 };
+}
+
+export function summarizeRenderIssues(issues: RenderIssue[]): RenderIssue[] {
+  const grouped = new Map<string, RenderIssue>();
+  for (const issue of issues) {
+    const key = JSON.stringify([issue.code, issue.itemId, issue.variableKey]);
+    const existing = grouped.get(key);
+    if (existing)
+      existing.occurrences = (existing.occurrences ?? 1) + (issue.occurrences ?? 1);
+    else grouped.set(key, { ...issue });
+  }
+  return [...grouped.values()];
 }
 
 function renderStep(

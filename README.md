@@ -19,6 +19,8 @@ For version information, an administrator first adds its exact IT Glue field key
 
 Only explicitly approved fields are retained and exposed. New fields are not enabled by this release; no existing mapping is overwritten. List-field tokens outside a step repeating that list, missing fields, invalid schemas, and stale values block new checklist creation. Existing runnable checklists remain frozen.
 
+Exception for an explicitly approved, optional Applications `version`: after a successful fresh sync, a blank/null version renders as **Not specified** in repeated instructions. This is a display fallback, not a change to stored IT Glue data. If `version` is listed in the mapping's required fields, it still blocks creation when blank. Unapproved fields and values awaiting refresh never receive this fallback. Validation groups repeated field errors and provides administrators an explicit organization-refresh action; opening a context panel still reads only PostgreSQL.
+
 ## Included
 
 - Next.js 16, TypeScript, PostgreSQL, Drizzle, Auth.js, Microsoft Entra ID, and TipTap.

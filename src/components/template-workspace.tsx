@@ -20,6 +20,7 @@ import { SaveQueue } from "@/lib/save-queue";
 import { RichTextEditor } from "./rich-text-editor";
 import { RichInstructions } from "./rich-instructions";
 import { RepeatedFieldHelp, VariableTokenPicker } from "./variable-token-picker";
+import { TemplateValidationPanel } from "./template-validation-panel";
 import {
   WorkspaceShell,
   ActionMenu,
@@ -163,7 +164,8 @@ export function TemplateWorkspace({
   }, [epoch, initialData.templateId, saveState, busy]);
   useEffect(() => {
     let canceled = false;
-    if (orgId && saveState === "saved")
+    const refresh = () => {
+      if (!orgId || saveState !== "saved" || busy || document.hidden) return;
       void api(
         `/api/templates/${data.templateId}/context?organizationId=${orgId}`,
       )
@@ -173,10 +175,16 @@ export function TemplateWorkspace({
         .catch(() => {
           if (!canceled) setError("Organization context is unavailable.");
         });
+    };
+    refresh();
+    const interval = setInterval(refresh, 30000);
+    window.addEventListener("focus", refresh);
     return () => {
       canceled = true;
+      clearInterval(interval);
+      window.removeEventListener("focus", refresh);
     };
-  }, [data.templateId, data.version, data.parent?.version, orgId, saveState]);
+  }, [data.templateId, data.version, data.parent?.version, orgId, saveState, busy, tab]);
   async function action(work: () => Promise<void>) {
     if (!gate.enter()) return;
     setBusy(true);
@@ -210,6 +218,18 @@ export function TemplateWorkspace({
       `/api/templates/${data.templateId}/items?itemId=${next.id}`,
       payload,
     );
+  }
+  async function refreshOrganization() {
+    if (!orgId || user.role !== "admin") return;
+    await action(async () => {
+      const result = await api(`/api/organizations/${orgId}/sync`, "POST");
+      const refreshed = await api(
+        `/api/templates/${data.templateId}/context?organizationId=${orgId}`,
+      );
+      setContext(refreshed.data);
+      if (result.data.status !== "valid")
+        setError("Organization data was refreshed, but validation issues remain. Inspect the Variables tab for details.");
+    });
   }
   async function reorder(
     id: string,
@@ -754,46 +774,18 @@ export function TemplateWorkspace({
               ))}
             </div>
           ) : (
-            <div className="rounded-xl border bg-white p-6">
-              <h2 className="font-semibold">
-                {context.valid
-                  ? "Ready to create a checklist"
-                  : "Checklist creation blocked"}
-              </h2>
-              {context.valid ? (
-                <p className="mt-2 text-sm text-slate-500">
-                  Referenced variables and placement anchors passed validation.
-                </p>
-              ) : (
-                <>
-                  <ul className="mt-4 space-y-2">
-                    {context.invalidVariables.map((key) => (
-                      <li key={key} className="text-sm text-red-700">
-                        Invalid variable: {key}
-                      </li>
-                    ))}
-                    {context.issues.map((issue, index) => (
-                      <li key={index}>
-                        <button
-                          className="text-left text-sm text-red-700 underline"
-                          onClick={() => {
-                            setSelectedId(issue.itemId);
-                            setTab("Canvas");
-                          }}
-                        >
-                          {
-                            data.steps.find((step) => step.id === issue.itemId)
-                              ?.title
-                          }
-                          : {issue.code}
-                          {issue.variableKey ? ` — ${issue.variableKey}` : ""}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-            </div>
+            <TemplateValidationPanel
+              context={context}
+              steps={data.steps}
+              canSync={user.role === "admin"}
+              busy={busy}
+              onSync={() => void refreshOrganization()}
+              onSelectStep={(id) => {
+                setSelectedId(id);
+                setTab("Canvas");
+              }}
+              onInspectVariables={() => setTab("Variables")}
+            />
           )}
         </section>
         <aside className="border-l bg-white p-5">

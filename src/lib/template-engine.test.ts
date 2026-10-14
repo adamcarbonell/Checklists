@@ -57,4 +57,22 @@ describe("template engine", () => {
     expect(result.valid).toBe(false);
     expect(result.issues.map((issue) => issue.variableKey)).toEqual(expect.arrayContaining(["org.applications.Version", "item.missing", "item.constructor", "item.details"]));
   });
+
+  it("groups identical missing-field errors across repeated records without changing validity", () => {
+    const result = renderTemplate([{ ...globals[1], title: "Install", body: body("{{org.applications.version}}") }], "org-1", { org: { applications: Array.from({ length: 59 }, () => ({ name: "App" })) } });
+    expect(result.valid).toBe(false);
+    expect(result.steps).toHaveLength(59);
+    expect(result.issues).toEqual([{ code: "missing_variable", itemId: "g2", variableKey: "org.applications.version", occurrences: 59 }]);
+  });
+  it("uses explicit optional-field fallbacks in qualified and short tokens without changing stored values", () => {
+    const values = { org: { applications: [{ name: "One", version: null }, { name: "Two", version: "" }, { name: "Three", version: "Latest" }] } };
+    const input: TemplateItem[] = [{ ...globals[1], title: "{{org.applications.name}} {{org.applications.version}}", body: body("Version: {{item.version}}") }];
+    const result = renderTemplate(input, "org-1", values, { optionalFieldFallbacks: { "org.applications": { version: "Not specified" } } });
+    expect(result.valid).toBe(true);
+    expect(result.steps.map((step) => step.title)).toEqual(["One Not specified", "Two Not specified", "Three Latest"]);
+    expect(result.steps[0].body).toEqual(body("Version: Not specified"));
+    expect(values.org.applications[0].version).toBeNull();
+    expect(values.org.applications[1].version).toBe("");
+    expect(renderTemplate(input, "org-1", values).valid).toBe(false);
+  });
 });

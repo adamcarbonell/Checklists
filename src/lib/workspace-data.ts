@@ -81,14 +81,16 @@ export async function loadDefinitions(db: Reader = getDatabase()) {
       schemaValid: variableDefinitions.schemaValid,
       enabled: variableDefinitions.enabled,
       selectedFields: variableDefinitions.selectedFields,
+      validationRules: variableDefinitions.validationRules,
     })
     .from(variableDefinitions)
     .where(isNull(variableDefinitions.deletedAt))
     .orderBy(asc(variableDefinitions.key))
     .limit(1000);
-  return definitions.map(({ selectedFields, ...definition }) => ({
+  return definitions.map(({ selectedFields, validationRules, ...definition }) => ({
     ...definition,
     fieldAliases: selectedFields.map((field) => field.alias),
+    requiredFieldAliases: validationRules.requiredFields ?? [],
   }));
 }
 export async function loadWorkspace(
@@ -285,7 +287,16 @@ export async function loadTemplateContext(
           placement: step.placement,
         },
   );
-  const rendered = renderTemplate(items, organizationId, values);
+  const applications = variables.find((variable) => variable.key === "org.applications");
+  const optionalVersion = applications?.status === "valid" &&
+    applications.cardinality === "list" &&
+    applications.fieldAliases.includes("version") &&
+    !applications.requiredFieldAliases.includes("version");
+  const rendered = renderTemplate(items, organizationId, values, {
+    optionalFieldFallbacks: optionalVersion
+      ? { "org.applications": { version: "Not specified" } }
+      : undefined,
+  });
   // Validate field references against the approved mapping even when a list is
   // empty. No record lookup can prove that an unknown alias is permitted.
   const fieldIssues = workspace.steps.flatMap((step) => {

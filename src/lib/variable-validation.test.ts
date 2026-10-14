@@ -21,4 +21,7 @@ describe("variable validation", () => {
     const result = resolveVariable(ad, [{ id: "1", name: "AD", fields: { value: 42 } }]);
     expect(result.issues).toContain("record_1_schema_mismatch_value");
   });
+  it("still rejects required whitespace-only values", () => {
+    expect(resolveVariable(ad, [{ id: "1", name: "AD", fields: { value: "  " } }]).issues).toContain("record_1_missing_value");
+  });
 });

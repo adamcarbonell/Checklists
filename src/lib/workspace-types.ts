@@ -34,6 +34,7 @@ export type VariableDefinitionSummary = {
   schemaValid: boolean;
   enabled: boolean;
   fieldAliases: string[];
+  requiredFieldAliases: string[];
 };
 export type WorkspaceData = {
   templateId: string;
