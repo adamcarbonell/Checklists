@@ -14,13 +14,14 @@ import type {
   TemplateSummary,
   TemplateContext,
 } from "@/lib/workspace-types";
-const mocks = vi.hoisted(() => ({ push: vi.fn(), signOut: vi.fn() }));
+const mocks = vi.hoisted(() => ({ push: vi.fn(), signOut: vi.fn(), dragEnd: undefined as undefined | ((event: unknown) => void) }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.push, refresh: vi.fn() }),
 }));
 vi.mock("next-auth/react", () => ({ signOut: mocks.signOut }));
 vi.mock("@dnd-kit/react", () => ({
-  DragDropProvider: ({ children }: { children: ReactNode }) => children,
+  DragDropProvider: ({ children, onDragEnd }: { children: ReactNode; onDragEnd: (event: unknown) => void }) => { mocks.dragEnd=onDragEnd; return children; },
+  useDraggable: () => ({ ref: () => {}, handleRef: () => {}, isDragSource: false }),
   useDroppable: () => ({ ref: () => {}, isDropTarget: false }),
 }));
 vi.mock("@dnd-kit/react/sortable", () => ({
@@ -253,6 +254,10 @@ beforeEach(() => {
           currentContext = structuredClone(templateContext);
           result = { data: { status: "valid" } };
         }
+        else if (url.endsWith("/order") && method === "PATCH") {
+          workspace.steps=workspace.steps.map((row)=>({...row,...body.proposedOrder.find((entry:{itemId:string})=>entry.itemId===row.id),version:row.version+1}));
+          workspace.version++;result={data:structuredClone(workspace)};
+        }
         else if (url.includes("/groups/") && method === "PATCH") {
           const parts=url.split("/"), groupId=parts[5], branchId=parts[7];
           const group=workspace.steps.find((row)=>row.id===groupId)!;
@@ -352,6 +357,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("new template authoring", () => {
+  it("persists handle drops on a node without relying on sortable optimistic indices", async () => {
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    mocks.dragEnd!({ canceled:false,operation:{source:{id:"local"},target:{id:"inherited"}} });
+    await waitFor(()=>expect(requests.some((row)=>row.url.endsWith("/order")&&row.method==="PATCH")).toBe(true));
+    const request=requests.find((row)=>row.url.endsWith("/order")&&row.method==="PATCH")!;
+    const proposed=request.body?.proposedOrder as Record<string,unknown>[];
+    expect(proposed.find((row)=>row.itemId==="local")).toMatchObject({placement:"before",anchorItemId:"inherited"});
+  });
   function conditionalWorkspace(inherited=false) {
     workspace.definitions.push({id:"email",key:"org.email",label:"Email",cardinality:"scalar",enabled:true,schemaValid:true,fieldAliases:["type","location"],requiredFieldAliases:[],fieldKinds:{type:"Text",location:"Text"}});
     workspace.steps.unshift({...fixture.steps[1],id:"group",title:"Email setup",nodeType:"condition_group",inherited,kind:inherited ? "global" : "org",templateId:inherited ? "parent" : "child",placement:inherited ? null : "end",anchorItemId:null});
@@ -359,6 +372,14 @@ describe("new template authoring", () => {
     workspace.branches=[{id:"if",groupItemId:"group",position:100,condition:{variableKey:"org.email.type",operator:"equals",value:"Office 365"}},{id:"else",groupItemId:"group",position:200,condition:null}];
     currentContext.conditionDecisions=[{groupId:"group",status:"selected",selectedBranchId:"if",evaluated:[]}];
   }
+  it("persists a branch boundary drop with branch-container information", async () => {
+    conditionalWorkspace(true);
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    mocks.dragEnd!({canceled:false,operation:{source:{id:"local"},target:{id:"branch:else:end"}}});
+    await waitFor(()=>expect(requests.some((row)=>row.url.endsWith("/order")&&row.method==="PATCH")).toBe(true));
+    const proposed=requests.find((row)=>row.url.endsWith("/order")&&row.method==="PATCH")!.body?.proposedOrder as Record<string,unknown>[];
+    expect(proposed.find((row)=>row.itemId==="local")).toMatchObject({parentBranchId:"else",placement:"end",anchorItemId:null});
+  });
   it("shows all branches, decision badges, and conditional rules without executable group instructions", async () => {
     conditionalWorkspace();
     render(<TemplateWorkspace initialData={workspace} user={user} />);

@@ -1,8 +1,7 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { DragDropProvider } from "@dnd-kit/react";
-import { useSortable, isSortable } from "@dnd-kit/react/sortable";
+import { DragDropProvider, useDraggable, useDroppable } from "@dnd-kit/react";
 import { GripVertical, Plus, Clock3, Eye, LockKeyhole } from "lucide-react";
 import type {
   WorkspaceData,
@@ -711,7 +710,6 @@ export function TemplateWorkspace({
                     if (
                       event.canceled ||
                       !source ||
-                      !isSortable(source) ||
                       !canEdit
                     )
                       return;
@@ -723,12 +721,13 @@ export function TemplateWorkspace({
                       );
                       return;
                     }
-                    const destination = target ? ordered.find((row) => row.id === String(target.id)) : ordered[source.index];
+                    const sourceIndex = ordered.findIndex((row) => row.id === String(source.id));
+                    const destination = target ? ordered.find((row) => row.id === String(target.id)) : undefined;
                     if (destination)
                       void reorder(
                         String(source.id),
                         destination.id,
-                        source.index > source.initialIndex ? "after" : "before",
+                        ordered.findIndex((row) => row.id === destination.id) > sourceIndex ? "after" : "before",
                       );
                   }}
                 >
@@ -1131,11 +1130,14 @@ function StepRow({
   actions: MenuAction[];
   anchors: string[];
 }) {
-  const { ref, handleRef, isDragSource, isDropTarget } = useSortable({
+  // Tree reparenting must stay in React, not the sortable plugin's optimistic
+  // DOM rearrangement: a group's descendants belong to the same moved node.
+  const { ref: dragRef, handleRef, isDragSource } = useDraggable({
     id: step.id,
-    index,
-    disabled: { draggable: disabled || step.inherited, droppable: disabled },
+    disabled: disabled || step.inherited,
   });
+  const { ref: dropRef, isDropTarget } = useDroppable({ id: step.id, disabled });
+  const ref = useCallback((element: HTMLDivElement | null) => { dragRef(element); dropRef(element); }, [dragRef, dropRef]);
   const missing =
     step.kind === "org" &&
     step.placement !== "start" &&
