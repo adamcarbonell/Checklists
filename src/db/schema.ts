@@ -13,6 +13,7 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { Comparison } from "@/lib/conditional-types";
 
 export const roleEnum = pgEnum("user_role", ["admin", "editor", "viewer"]);
 export const cardinalityEnum = pgEnum("variable_cardinality", [
@@ -174,6 +175,8 @@ export const templateItems = pgTable(
       .notNull()
       .references(() => templates.id, { onDelete: "cascade" }),
     title: text("title").notNull(),
+    nodeType: text("node_type").$type<"step" | "condition_group">().notNull().default("step"),
+    parentBranchId: uuid("parent_branch_id").references((): AnyPgColumn => templateBranches.id),
     body: jsonb("body").$type<Record<string, unknown>>().notNull(),
     repeatVariableId: uuid("repeat_variable_id").references(
       () => variableDefinitions.id,
@@ -195,8 +198,19 @@ export const templateItems = pgTable(
       "step_placement_check",
       sql`${table.placement} IS NULL OR ${table.placement} IN ('start', 'end', 'before', 'after')`,
     ),
+    check("template_item_node_type_check", sql`${table.nodeType} IN ('step', 'condition_group')`),
+    check("conditional_group_no_repeat", sql`${table.nodeType} = 'step' OR ${table.repeatVariableId} IS NULL`),
   ],
 );
+
+export const templateBranches = pgTable("template_condition_branches", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  groupItemId: uuid("group_item_id").notNull().references(() => templateItems.id),
+  position: integer("position").notNull(),
+  condition: jsonb("condition").$type<Comparison | null>(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  ...timestamps,
+}, (table) => [index("template_branches_group_idx").on(table.groupItemId, table.deletedAt, table.position)]);
 
 export const checklists = pgTable(
   "checklists",

@@ -14,6 +14,7 @@ const create = z
     body: richDocumentSchema,
     repeatVariableId: z.uuid().nullable().optional(),
     anchorItemId: z.uuid().nullable().optional(),
+    parentBranchId: z.uuid().nullable().optional(),
     placement: z
       .enum(["start", "end", "before", "after"])
       .nullable()

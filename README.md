@@ -11,6 +11,18 @@ Private, organization-aware template authoring and shared checklist execution fo
 
 Local steps belong to one organization template and are never placed in a reusable library. Removing an inherited anchor leaves its local additions visibly unplaced and blocks new checklists until repaired.
 
+### Conditional groups
+
+In a global or organization template, choose **Add conditional group**, give it a label, and select an approved scalar organization field, **equals / does not equal**, and a typed literal. For Email, use `org.email.type` with `Office 365`, then add an ELSE IF for `GSuite` and optionally ELSE. Text ignores case and outer whitespace, but internal spaces and product names are distinct. Number and Boolean comparisons never coerce strings.
+
+Every branch stays visible in the authoring canvas and can be collapsed. Organization badges show selected, not selected, blocked, or unavailable. Add steps or nested groups inside a branch; groups can nest ten levels deep. Drag handles and **Move to…** move owned steps/groups between branches or to an unconditional boundary. Move up/down is also available; branch menus reorder rules. A group moves with its descendants. Inherited rules/content are read-only, but an org template can add local steps/groups inside inherited branches.
+
+Preview and new checklist creation evaluate the first matching branch before resolving instructions or expanding repetitions. Missing/stale/invalid condition data blocks instead of falling through to ELSE. A reached group with no matching branch and no ELSE blocks; an empty branch is an intentional no-op, but an entirely empty checklist remains invalid. Data used only by an inactive branch does not block. Structural problems always block.
+
+Deleting a group/branch soft-deletes only its owned subtree, after confirmation. Client-owned additions remain unplaced if an inherited anchor disappears; repair their location or restore the source from history. Restores reject changed membership instead of discarding work. Frozen checklists retain selected instructions, source versions, consulted approved values, and branch decisions in their creation activity.
+
+The conditional schema migration is additive. Existing steps migrate to unconditional root nodes without ID/content changes. For an existing deployment, use the forward migration only—**no reset flag**, reseeding, infrastructure rebuild, or credential rotation is needed.
+
 ### Application fields in repeated steps
 
 Enable **Repeat for a list variable** and select **Applications**. In that step's title or instructions, use `{{org.applications.name}}` (or the equivalent `{{item.name}}`). Each rendered step receives the current application's field, not the entire list. The editor's **Variable** picker lists the approved fields for the selected repeat list.

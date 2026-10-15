@@ -9,6 +9,8 @@ export async function GET() {
     );
   try {
     // The new web image must not receive traffic before its schema exists.
+    await getDatabase().execute(sql`select i.node_type, i.parent_branch_id, b.condition
+      from template_items i cross join template_condition_branches b limit 0`);
     await getDatabase()
       .execute(sql`select t.scope, t.version, c.variable_snapshot, s.version
       from templates t cross join checklists c cross join checklist_steps s limit 0`);

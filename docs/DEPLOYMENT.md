@@ -34,6 +34,18 @@ The reset permanently removes existing test templates, reusable libraries, and t
 
 ## Migration-first releases after cutover
 
+### Conditional-groups release (0002)
+
+This release is additive and preserves existing templates, steps and IDs, revisions, runnable checklists/progress, organization mappings/values, synchronization, users, and audit history. **Do not supply `--confirm-template-reset`.** Do not rerun the infrastructure template or change secrets.
+
+1. Build the tested commit with direct web CD off. Record its successful build ID.
+2. Briefly scale web to zero and wait for all instances/writes to stop. Keep PostgreSQL and the sync schedule unchanged.
+3. Pin `checklists-migrate` to that exact web build ID using its normal forward-only command: `sh -c "node node_modules/tsx/dist/cli.mjs scripts/migrate.ts"`. Run once and require success. The migration journal ensures reruns do not repeat already-applied migrations, including the previous reset.
+4. Promote the same successful build to web, resume one instance, and require both public health endpoints to return 200. New readiness checks require the branch table and node columns.
+5. Verify authenticated conditional editing, nested placement/reload, selected-branch preview, inherited read-only rules, local additions, and unchanged existing checklists. Do not run an old editor after authoring conditional content; fix forward if necessary.
+
+The isolated database tests verify the additive migration and idempotent journal behavior without relying on production data. They do not replace authenticated post-deployment checks.
+
 `northflank/release-flow.json` selects/reuses a successful build once, references its build ID for the migration job, waits for migration success, then promotes that same ID to web. This avoids different “latest” builds being chosen while another commit arrives. Configure/import this release flow in the existing pipeline; attach the existing web service and migration job. Do not import the infrastructure provisioning template for an update.
 
 Keep combined-service CD off so it cannot bypass migrations. Git triggers can run the flow for `main`. The routine flow does **not** authorize the one-time template reset; complete the guarded cutover manually first. Northflank's official [release-flow guide](https://www.northflank.ai/docs/v1/application/release/pipeline/configure-a-release-flow) describes build references and migration sequencing; [CI/CD guidance](https://northflank.com/docs/v1/application/release/manage-ci-cd) explains disabling direct CD.

@@ -44,6 +44,6 @@ describe("actionable template validation", () => {
     const missing = screen.getByRole("button", { name: /org.applications.version \(59 repeated records\)/ });
     expect(screen.getAllByRole("button", { name: /missing_variable/ })).toHaveLength(1);
     fireEvent.click(missing); expect(actions.onSelectStep).toHaveBeenCalledWith("step");
-    expect(screen.getByRole("button", { name: /missing_anchor/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Unplaced content/ })).toBeTruthy();
   });
 });

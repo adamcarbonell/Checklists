@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, inArray } from "drizzle-orm";
 import {
   getDatabase,
   hasDatabase,
@@ -9,6 +9,7 @@ import {
   organizations,
   organizationVariableValues,
   templateItems,
+  templateBranches,
   templates,
   variableDefinitions,
 } from "@/db/schema";
@@ -16,7 +17,6 @@ import {
   extractVariableKeys,
   renderTemplate,
   type RichNode,
-  type TemplateItem,
 } from "./template-engine";
 import type {
   WorkspaceData,
@@ -25,6 +25,8 @@ import type {
   ContextVariable,
   TemplateSummary,
 } from "./workspace-types";
+import { conditionFields } from "./conditional-types";
+import { workspaceItems } from "./conditional-tree";
 type Reader = Database | DatabaseTransaction;
 export async function loadOrganizations(db: Reader = getDatabase()) {
   return db
@@ -90,6 +92,7 @@ export async function loadDefinitions(db: Reader = getDatabase()) {
   return definitions.map(({ selectedFields, validationRules, ...definition }) => ({
     ...definition,
     fieldAliases: selectedFields.map((field) => field.alias),
+    fieldKinds: Object.fromEntries(selectedFields.map((field) => [field.alias, field.expectedKind])),
     requiredFieldAliases: validationRules.requiredFields ?? [],
   }));
 }
@@ -146,6 +149,8 @@ export async function loadWorkspace(
         .orderBy(asc(templateItems.position))
     : [];
   const steps: WorkspaceStep[] = [...inherited, ...rows].map((row) => ({
+    nodeType: row.nodeType,
+    parentBranchId: row.parentBranchId,
     id: row.id,
     templateId: row.templateId,
     title: row.title,
@@ -166,6 +171,9 @@ export async function loadWorkspace(
     )?.key,
     version: row.version,
   }));
+  const branches = steps.length ? await db.select().from(templateBranches)
+    .where(and(inArray(templateBranches.groupItemId, steps.map((step) => step.id)), isNull(templateBranches.deletedAt)))
+    .orderBy(asc(templateBranches.position)) : [];
   return {
     templateId: template.id,
     templateName: template.name,
@@ -178,6 +186,8 @@ export async function loadWorkspace(
       : null,
     version: template.version,
     steps,
+    branches: branches.map((branch) => ({ id: branch.id, groupItemId: branch.groupItemId, position: branch.position,
+      condition: branch.condition, inherited: steps.find((step) => step.id === branch.groupItemId)?.inherited ?? false })),
     organizations: orgs,
     definitions,
   };
@@ -200,21 +210,6 @@ export async function loadTemplateContext(
     .from(organizationVariableValues)
     .where(eq(organizationVariableValues.organizationId, organizationId));
   const byDefinition = new Map(stored.map((row) => [row.definitionId, row]));
-  const usedKeys = new Set(
-    workspace.steps
-      .flatMap((step) => [
-        ...extractVariableKeys(step.title),
-        ...extractVariableKeys(step.body),
-        ...(step.repeat ? [step.repeat] : []),
-      ])
-      .filter((key) => !key.startsWith("item."))
-      .map((key) =>
-        workspace.definitions.find(
-          (definition) =>
-            key === definition.key || key.startsWith(`${definition.key}.`),
-        )?.key ?? key,
-      ),
-  );
   const variables: ContextVariable[] = workspace.definitions.map(
     (definition) => {
       const row = byDefinition.get(definition.id),
@@ -258,48 +253,34 @@ export async function loadTemplateContext(
           ...(malformed ? ["malformed_normalized_list"] : []),
         ],
         syncedAt: row?.syncedAt?.toISOString() ?? null,
-        used: usedKeys.has(definition.key),
+        used: false,
       };
     },
   );
   const values: Record<string, unknown> = {};
   for (const variable of variables)
     setPath(values, variable.key, variable.value);
-  const items: TemplateItem[] = workspace.steps.map((step) =>
-    step.kind === "global"
-      ? {
-          id: step.id,
-          kind: "global",
-          position: step.position,
-          title: step.title,
-          body: step.body,
-          repeatVariableKey: step.repeat,
-        }
-      : {
-          id: step.id,
-          kind: "organization",
-          organizationId,
-          position: step.position,
-          title: step.title,
-          body: step.body,
-          repeatVariableKey: step.repeat,
-          anchorItemId: step.anchorItemId,
-          placement: step.placement,
-        },
-  );
+  const items = workspaceItems(workspace.steps, organizationId);
   const applications = variables.find((variable) => variable.key === "org.applications");
   const optionalVersion = applications?.status === "valid" &&
     applications.cardinality === "list" &&
     applications.fieldAliases.includes("version") &&
     !applications.requiredFieldAliases.includes("version");
   const rendered = renderTemplate(items, organizationId, values, {
+    branches: workspace.branches,
+    conditionFields: conditionFields(workspace.definitions),
+    variableStates: Object.fromEntries(variables.map((variable) => [variable.key, variable.status])),
     optionalFieldFallbacks: optionalVersion
       ? { "org.applications": { version: "Not specified" } }
       : undefined,
   });
+  const usedKeys = new Set(rendered.usedVariableKeys.filter((key) => !key.startsWith("item."))
+    .map((key) => workspace.definitions.find((definition) => key === definition.key || key.startsWith(`${definition.key}.`))?.key ?? key));
+  for (const variable of variables) variable.used = usedKeys.has(variable.key);
+  const activeSteps = workspace.steps.filter((step) => rendered.activeItemIds.includes(step.id));
   // Validate field references against the approved mapping even when a list is
   // empty. No record lookup can prove that an unknown alias is permitted.
-  const fieldIssues = workspace.steps.flatMap((step) => {
+  const fieldIssues = activeSteps.flatMap((step) => {
     const repeated = workspace.definitions.find(
       (definition) => definition.id === step.repeatVariableId,
     );
@@ -341,7 +322,7 @@ export async function loadTemplateContext(
     ...(!rendered.steps.length
       ? [{ code: "empty_checklist" as const, itemId: templateId }]
       : []),
-    ...workspace.steps
+    ...activeSteps
       .filter(
         (step) =>
           step.repeatVariableId &&
@@ -365,6 +346,7 @@ export async function loadTemplateContext(
     invalidVariables,
     valid: issues.length === 0 && invalidVariables.length === 0,
     steps: rendered.steps,
+    conditionDecisions: rendered.conditionDecisions,
     templateVersion: workspace.version,
     parentVersion: workspace.parent?.version ?? null,
   };

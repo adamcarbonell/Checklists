@@ -2,6 +2,14 @@
 
 import { summarizeRenderIssues } from "@/lib/template-engine";
 import type { ContextVariable, TemplateContext, WorkspaceStep } from "@/lib/workspace-types";
+const issueLabels: Record<string, string> = {
+  condition_no_match: "No branch matched, and this group has no ELSE. Add a matching branch or an intentional empty ELSE.",
+  condition_data_invalid: "Condition data is missing, stale, malformed, or unapproved. It cannot fall through to ELSE.",
+  invalid_condition: "This condition no longer uses an approved scalar field and matching literal type.",
+  condition_depth_exceeded: "This group exceeds ten levels of nesting.",
+  invalid_structure: "Invalid ownership, branch structure, or a cycle. Repair this group’s location or branches.",
+  missing_anchor: "Unplaced content: its inherited anchor or branch is unavailable. Choose a new location.",
+};
 
 function variableProblem(variable: ContextVariable) {
   if (!variable.enabled) return "This variable is disabled. An administrator must review its mapping.";
@@ -62,9 +70,9 @@ export function TemplateValidationPanel({
               );
             })}
             {visibleIssues.map((issue) => (
-              <li key={JSON.stringify([issue.code, issue.itemId, issue.variableKey])}>
+              <li key={JSON.stringify([issue.code, issue.itemId, issue.branchId, issue.variableKey])}>
                 <button className="text-left text-sm text-red-700 underline" onClick={() => onSelectStep(issue.itemId)}>
-                  {steps.find((step) => step.id === issue.itemId)?.title ?? "Template"}: {issue.code}
+                  {steps.find((step) => step.id === issue.itemId)?.title ?? "Template"}: {issueLabels[issue.code] ?? issue.code}
                   {issue.variableKey ? ` — ${issue.variableKey}` : ""}
                   {(issue.occurrences ?? 1) > 1 ? ` (${issue.occurrences} repeated records)` : ""}
                 </button>

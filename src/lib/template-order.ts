@@ -1,9 +1,12 @@
 import type { Placement, WorkspaceStep } from "./workspace-types";
+import type { TemplateBranch } from "./conditional-types";
+import { buildTemplateTree, workspaceItems, type TreeNode } from "./conditional-tree";
 export type OrderEntry = {
   itemId: string;
   position: number;
   anchorItemId: string | null;
   placement: Placement | null;
+  parentBranchId?: string | null;
 };
 export type OrderItem = OrderEntry & { owned: boolean };
 export class OrderError extends Error {
@@ -19,6 +22,7 @@ export const orderEntry = (row: OrderEntry): OrderEntry => ({
   position: row.position,
   anchorItemId: row.anchorItemId,
   placement: row.placement,
+  parentBranchId: row.parentBranchId ?? null,
 });
 export const stepOrder = (step: WorkspaceStep): OrderItem => ({
   ...orderEntry({
@@ -26,6 +30,7 @@ export const stepOrder = (step: WorkspaceStep): OrderItem => ({
     position: step.position,
     anchorItemId: step.anchorItemId,
     placement: step.placement,
+    parentBranchId: step.parentBranchId ?? null,
   }),
   owned: !step.inherited,
 });
@@ -82,7 +87,7 @@ export function validateOrder(
     }
     const reanchored =
       change.anchorItemId !== row.anchorItemId ||
-      change.placement !== row.placement;
+      change.placement !== row.placement || (change.parentBranchId ?? null) !== (row.parentBranchId ?? null);
     if (reanchored && row.itemId !== movedId)
       throw new OrderError("anchor_change_not_allowed");
     if (
@@ -92,8 +97,8 @@ export function validateOrder(
       throw new OrderError("invalid_anchor", 409);
     const bucket =
       scope === "global"
-        ? "global"
-        : change.placement + ":" + change.anchorItemId;
+        ? "global:" + (change.parentBranchId ?? "root")
+        : change.placement + ":" + change.anchorItemId + ":" + (change.parentBranchId ?? "root");
     const positions = buckets.get(bucket) ?? new Set<number>();
     if (positions.has(change.position))
       throw new OrderError("duplicate_position");
@@ -101,7 +106,12 @@ export function validateOrder(
     buckets.set(bucket, positions);
   }
 }
-export function visibleOrder(steps: WorkspaceStep[]) {
+export function visibleOrder(steps: WorkspaceStep[], branches?: TemplateBranch[]) {
+  if (branches?.length) {
+    const tree = buildTemplateTree(workspaceItems(steps, steps.find((row) => row.organizationId)?.organizationId ?? ""), branches, steps.find((row) => row.organizationId)?.organizationId ?? "");
+    const flatten = (nodes: TreeNode[]): string[] => nodes.flatMap((node) => [node.item.id, ...node.branches.flatMap((branch) => flatten(branch.children))]);
+    return [...flatten(tree.roots), ...tree.unplaced.map((node) => node.id)].map((id) => steps.find((row) => row.id === id)!);
+  }
   const base = steps
       .filter((step) => step.kind === "global")
       .sort((a, b) => a.position - b.position),
@@ -134,10 +144,44 @@ export function moveStep(
   movedId: string,
   targetId: string,
   side: "before" | "after",
+  branches: TemplateBranch[] = [],
 ) {
   const moved = steps.find((step) => step.id === movedId),
     target = steps.find((step) => step.id === targetId);
   if (!moved || moved.inherited || movedId === targetId) return steps;
+  if (branches.length || targetId.startsWith("branch:") || targetId === "start" || targetId === "end") {
+    let parentBranchId: string | null = null, placement: Placement | null = null, anchorItemId: string | null = null;
+    const branchTarget = /^branch:([^:]+):(start|end)$/.exec(targetId);
+    if (branchTarget) {
+      if (!branches.some((branch) => branch.id === branchTarget[1])) return steps;
+      parentBranchId = branchTarget[1];
+      placement = moved.kind === "org" ? branchTarget[2] as Placement : null;
+    } else if (targetId === "start" || targetId === "end") placement = moved.kind === "org" ? targetId : null;
+    else if (!target) return steps;
+    else if (moved.kind === "org" && target.inherited) {
+      placement = side; anchorItemId = target.id;
+    } else {
+      if (moved.kind !== target.kind || target.inherited) return steps;
+      parentBranchId = target.parentBranchId ?? null;
+      placement = target.placement; anchorItemId = target.anchorItemId;
+    }
+    // Moving a group into any descendant's branch would create a cycle.
+    let branch = parentBranchId;
+    const visited = new Set<string>();
+    while (branch && !visited.has(branch)) {
+      visited.add(branch);
+      const owner = steps.find((row) => row.id === branches.find((row) => row.id === branch)?.groupItemId);
+      if (owner?.id === movedId) return steps;
+      branch = owner?.parentBranchId ?? (owner?.anchorItemId ? steps.find((row) => row.id === owner.anchorItemId)?.parentBranchId : null) ?? null;
+    }
+    const siblings = steps.filter((row) => row.id !== movedId && !row.inherited && row.kind === moved.kind &&
+      (row.parentBranchId ?? null) === parentBranchId && row.placement === placement && row.anchorItemId === anchorItemId).sort((a,b) => a.position - b.position);
+    const index = target && siblings.some((row) => row.id === target.id) ? siblings.findIndex((row) => row.id === target.id) + (side === "after" ? 1 : 0) :
+      branchTarget?.[2] === "start" || targetId === "start" ? 0 : side === "after" && anchorItemId ? 0 : siblings.length;
+    siblings.splice(index, 0, { ...moved, parentBranchId, placement, anchorItemId });
+    const updates = new Map(siblings.map((row,index) => [row.id, { ...row, position: (index+1)*100 }]));
+    return steps.map((row) => updates.get(row.id) ?? row);
+  }
   if (moved.kind === "global") {
     if (!target || target.kind !== "global") return steps;
     const rows = steps

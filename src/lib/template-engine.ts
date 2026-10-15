@@ -1,3 +1,5 @@
+import { buildTemplateTree, evaluateTree } from "./conditional-tree";
+import type { TemplateBranch, ConditionField } from "./conditional-types";
 export type RichNode = {
   type?: string;
   text?: string;
@@ -7,6 +9,9 @@ export type RichNode = {
 };
 
 export type GlobalTemplateItem = {
+  templateId?: string;
+  nodeType?: "step" | "condition_group";
+  parentBranchId?: string | null;
   id: string;
   kind: "global";
   position: number;
@@ -17,6 +22,9 @@ export type GlobalTemplateItem = {
 };
 
 export type OrganizationTemplateItem = {
+  templateId?: string;
+  nodeType?: "step" | "condition_group";
+  parentBranchId?: string | null;
   id: string;
   kind: "organization";
   organizationId: string;
@@ -32,6 +40,9 @@ export type OrganizationTemplateItem = {
 export type TemplateItem = GlobalTemplateItem | OrganizationTemplateItem;
 export type VariableValues = Record<string, unknown>;
 export type RenderOptions = {
+  branches?: TemplateBranch[];
+  conditionFields?: ConditionField[];
+  variableStates?: Record<string, string>;
   optionalFieldFallbacks?: Record<string, Record<string, string>>;
 };
 export type RenderIssue = {
@@ -41,7 +52,13 @@ export type RenderIssue = {
     | "invalid_list"
     | "too_many_steps"
     | "empty_checklist"
-    | "missing_source";
+    | "missing_source"
+    | "invalid_structure"
+    | "condition_depth_exceeded"
+    | "invalid_condition"
+    | "condition_data_invalid"
+    | "condition_no_match";
+  branchId?: string;
   itemId: string;
   variableKey?: string;
   occurrences?: number;
@@ -131,7 +148,8 @@ export function renderTemplate(
   values: VariableValues,
   options: RenderOptions = {},
 ) {
-  const merged = mergeTemplateItems(items, organizationId);
+  const evaluated = evaluateTree(buildTemplateTree(items, options.branches ?? [], organizationId), values, options.conditionFields ?? [], options.variableStates);
+  const merged = { items: evaluated.items, issues: evaluated.issues };
   const issues = [...merged.issues];
   const steps: RenderedStep[] = [];
 
@@ -206,13 +224,19 @@ export function renderTemplate(
           variableKey: key,
         });
     }
-  return { steps, issues: summarizeRenderIssues(issues), valid: issues.length === 0 };
+  const usedVariableKeys = new Set(evaluated.usedKeys);
+  for (const item of evaluated.items) {
+    for (const key of [...extractVariableKeys(item.title), ...extractVariableKeys(item.body)]) usedVariableKeys.add(key);
+    if (item.repeatVariableKey) usedVariableKeys.add(item.repeatVariableKey);
+  }
+  return { steps, issues: summarizeRenderIssues(issues), valid: issues.length === 0,
+    activeItemIds: evaluated.items.map((item) => item.id), usedVariableKeys: [...usedVariableKeys], conditionDecisions: evaluated.decisions };
 }
 
 export function summarizeRenderIssues(issues: RenderIssue[]): RenderIssue[] {
   const grouped = new Map<string, RenderIssue>();
   for (const issue of issues) {
-    const key = JSON.stringify([issue.code, issue.itemId, issue.variableKey]);
+    const key = JSON.stringify([issue.code, issue.itemId, issue.variableKey, issue.branchId]);
     const existing = grouped.get(key);
     if (existing)
       existing.occurrences = (existing.occurrences ?? 1) + (issue.occurrences ?? 1);

@@ -154,6 +154,7 @@ async function createChecklistAttempt(
             templateVersion: created.templateVersion,
             globalTemplateVersion: created.globalTemplateVersion,
             stepCount: context.steps.length,
+            conditionDecisions: context.conditionDecisions ?? [],
           },
         });
       await recordAudit(

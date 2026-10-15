@@ -1,11 +1,12 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, sql, inArray } from "drizzle-orm";
 import { getDatabase, type DatabaseTransaction } from "@/db/client";
-import { organizations, templateItems, templates } from "@/db/schema";
+import { organizations, templateItems, templateBranches, templates } from "@/db/schema";
 import { recordAudit, recordRevision } from "./audit";
 import { OrderError, validPlacement } from "./template-order";
 import { validateRepeatVariable } from "./repeat-validation";
 import type { Placement } from "./workspace-types";
 import type { RichNode } from "./template-engine";
+import { assertTemplateStructure } from "./template-structure";
 export async function lockTemplate(
   tx: DatabaseTransaction,
   id: string,
@@ -64,7 +65,7 @@ export async function bumpTemplate(tx: DatabaseTransaction, id: string) {
 export async function assertPlacement(
   tx: DatabaseTransaction,
   template: typeof templates.$inferSelect,
-  entry: { anchorItemId: string | null; placement: Placement | null },
+  entry: { anchorItemId: string | null; placement: Placement | null; parentBranchId?: string | null },
 ) {
   const inherited = template.globalTemplateId
     ? await tx
@@ -77,6 +78,15 @@ export async function assertPlacement(
           ),
         )
     : [];
+  if (entry.parentBranchId) {
+    if (entry.anchorItemId) throw new OrderError("invalid_anchor", 409);
+    const [branch] = await tx.select({ id: templateBranches.id }).from(templateBranches)
+      .innerJoin(templateItems, eq(templateBranches.groupItemId, templateItems.id))
+      .where(and(eq(templateBranches.id, entry.parentBranchId), isNull(templateBranches.deletedAt),
+        isNull(templateItems.deletedAt), eq(templateItems.nodeType, "condition_group"),
+        inArray(templateItems.templateId, [template.id, ...(template.globalTemplateId ? [template.globalTemplateId] : [])]))).limit(1);
+    if (!branch) throw new OrderError("invalid_anchor", 409);
+  }
   if (
     !validPlacement(
       { itemId: "", position: 0, ...entry },
@@ -240,6 +250,7 @@ export async function createStep(
     repeatVariableId?: string | null;
     anchorItemId?: string | null;
     placement?: Placement | null;
+    parentBranchId?: string | null;
   },
   actorUserId: string,
 ) {
@@ -249,7 +260,7 @@ export async function createStep(
     const placement =
         input.placement ?? (template.scope === "organization" ? "end" : null),
       anchorItemId = input.anchorItemId ?? null;
-    await assertPlacement(tx, template, { placement, anchorItemId });
+    await assertPlacement(tx, template, { placement, anchorItemId, parentBranchId: input.parentBranchId });
     const rows = await tx
       .select({ position: templateItems.position })
       .from(templateItems)
@@ -265,9 +276,11 @@ export async function createStep(
         repeatVariableId: input.repeatVariableId,
         placement,
         anchorItemId,
+        parentBranchId: input.parentBranchId ?? null,
         position: Math.max(0, ...rows.map((row) => row.position)) + 100,
       })
       .returning();
+    await assertTemplateStructure(tx, id, [created.id]);
     await bumpTemplate(tx, id);
     await recordAudit(
       {
@@ -304,6 +317,7 @@ export async function changeStep(
     if (!current) throw new OrderError("step_not_found", 404);
     if (current.templateId !== id)
       throw new OrderError("inherited_step_read_only", 403);
+    if (current.nodeType !== "step") throw new OrderError("group_endpoint_required", 400);
     if (current.version !== input.expectedVersion)
       throw new OrderError("step_changed_reload", 409);
     await recordRevision(
@@ -352,6 +366,7 @@ export async function deleteStep(
     if (!current) throw new OrderError("step_not_found", 404);
     if (current.templateId !== id)
       throw new OrderError("inherited_step_read_only", 403);
+    if (current.nodeType !== "step") throw new OrderError("group_endpoint_required");
     await recordRevision(
       {
         actorUserId,

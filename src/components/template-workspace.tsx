@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { DragDropProvider, useDroppable } from "@dnd-kit/react";
+import { DragDropProvider } from "@dnd-kit/react";
 import { useSortable, isSortable } from "@dnd-kit/react/sortable";
 import { GripVertical, Plus, Clock3, Eye, LockKeyhole } from "lucide-react";
 import type {
@@ -17,6 +17,9 @@ import {
   orderEntry,
 } from "@/lib/template-order";
 import { SaveQueue } from "@/lib/save-queue";
+import type { Comparison } from "@/lib/conditional-types";
+import { ConditionalCanvas, RuleEditor, defaultComparison, conditionFields, BranchDropZone } from "./conditional-editor";
+import { isGroup } from "@/lib/conditional-tree";
 import { RichTextEditor } from "./rich-text-editor";
 import { RichInstructions } from "./rich-instructions";
 import { RepeatedFieldHelp, VariableTokenPicker } from "./variable-token-picker";
@@ -64,6 +67,11 @@ export function TemplateWorkspace({
     [preview, setPreview] = useState(false),
     [details, setDetails] = useState(false),
     [variable, setVariable] = useState(false);
+  const [newGroup, setNewGroup] = useState<{ parentBranchId: string | null; title: string; condition: Comparison } | null>(null),
+    [newBranch, setNewBranch] = useState<{ groupId: string; condition: Comparison } | null>(null),
+    [moveId, setMoveId] = useState<string | null>(null),
+    [destination, setDestination] = useState("before|end");
+  const fields = conditionFields(data.definitions);
   const [name, setName] = useState(initialData.templateName),
     [description, setDescription] = useState(initialData.templateDescription),
     [dropHint, setDropHint] = useState("");
@@ -79,21 +87,22 @@ export function TemplateWorkspace({
     () =>
       new SaveQueue(
         async (url, body) => {
-          const id = new URL(url, "http://local").searchParams.get("itemId")!;
+          const parsed = new URL(url, "http://local"), parts = parsed.pathname.split("/");
+          const groupIndex = parts.indexOf("groups"), id = groupIndex >= 0 ? parts[groupIndex + 1] : parsed.searchParams.get("itemId")!;
+          const draftId = groupIndex >= 0 && parts.includes("branches") ? parts.at(-1)! : id;
           const result = await api(url, "PATCH", {
             ...body,
             expectedVersion: versions.get(id),
           });
-          versions.set(id, result.data.version);
-          templateVersions.set(
-            initialData.templateId,
-            result.data.templateVersion,
-          );
-          if (drafts.get(id) === body) drafts.delete(id);
+          const version = result.data.version ?? result.data.groupVersion;
+          versions.set(id, version);
+          if (result.data.templateVersion) templateVersions.set(initialData.templateId, result.data.templateVersion);
+          else templateVersions.set(initialData.templateId, (templateVersions.get(initialData.templateId) ?? 0) + 1);
+          if (drafts.get(draftId) === body) drafts.delete(draftId);
           setData((current) => ({
             ...current,
             steps: current.steps.map((step) =>
-              step.id === id ? { ...step, version: result.data.version } : step,
+              step.id === id ? { ...step, version } : step,
             ),
           }));
         },
@@ -103,7 +112,7 @@ export function TemplateWorkspace({
         },
       ),
   );
-  const ordered = useMemo(() => visibleOrder(data.steps), [data.steps]),
+  const ordered = useMemo(() => visibleOrder(data.steps, data.branches), [data.steps, data.branches]),
     selected = ordered.find((step) => step.id === selectedId) ?? ordered[0];
   const owned = selected && !selected.inherited && canEdit && !busy;
   function accept(next: WorkspaceData) {
@@ -117,6 +126,7 @@ export function TemplateWorkspace({
         ...(drafts.get(step.id) ?? {}),
         version: versions.get(step.id)!,
       })),
+      branches: next.branches?.map((branch) => ({ ...branch, ...(drafts.get(branch.id) ?? {}) })),
     });
   }
   async function reload() {
@@ -202,7 +212,7 @@ export function TemplateWorkspace({
   function update(change: Partial<WorkspaceStep>) {
     if (!selected || !owned) return;
     const next = { ...selected, ...change },
-      payload = {
+      payload = isGroup(next) ? { title: next.title } : {
         title: next.title,
         body: next.body,
         repeatVariableId: next.repeatVariableId,
@@ -215,7 +225,7 @@ export function TemplateWorkspace({
     }));
     queue.schedule(
       next.id,
-      `/api/templates/${data.templateId}/items?itemId=${next.id}`,
+      isGroup(next) ? `/api/templates/${data.templateId}/groups/${next.id}` : `/api/templates/${data.templateId}/items?itemId=${next.id}`,
       payload,
     );
   }
@@ -250,7 +260,7 @@ export function TemplateWorkspace({
         );
       }
       const previous = fresh,
-        proposed = moveStep(fresh.steps, id, targetId, side);
+        proposed = moveStep(fresh.steps, id, targetId, side, fresh.branches);
       if (JSON.stringify(proposed) === JSON.stringify(fresh.steps)) return;
       setData({ ...fresh, steps: proposed });
       setContext(null);
@@ -274,15 +284,21 @@ export function TemplateWorkspace({
     });
   }
   function movement(step: WorkspaceStep, direction: number) {
-    const index = ordered.findIndex((entry) => entry.id === step.id),
-      target = ordered[index + direction];
+    const siblings = ordered.filter((entry) => (entry.parentBranchId ?? null) === (step.parentBranchId ?? null) && entry.placement === step.placement && entry.anchorItemId === step.anchorItemId),
+      index = siblings.findIndex((entry) => entry.id === step.id),
+      target = siblings[index + direction];
     if (target)
       void reorder(step.id, target.id, direction < 0 ? "before" : "after");
   }
   function actions(step: WorkspaceStep): MenuAction[] {
-    const index = ordered.findIndex((entry) => entry.id === step.id),
+    const siblings = ordered.filter((entry) => (entry.parentBranchId ?? null) === (step.parentBranchId ?? null) && entry.placement === step.placement && entry.anchorItemId === step.anchorItemId),
+      index = siblings.findIndex((entry) => entry.id === step.id),
       editable = canEdit && !step.inherited && !busy;
     return [
+      {
+        label: "Move to…", disabled: !editable,
+        onClick: () => { setMoveId(step.id); setDestination("before|end"); },
+      },
       {
         label: "Move up",
         disabled: !editable || index === 0,
@@ -290,7 +306,7 @@ export function TemplateWorkspace({
       },
       {
         label: "Move down",
-        disabled: !editable || index === ordered.length - 1,
+        disabled: !editable || index === siblings.length - 1,
         onClick: () => movement(step, 1),
       },
       ...(data.scope === "organization" && !step.inherited
@@ -308,11 +324,11 @@ export function TemplateWorkspace({
           ]
         : []),
       {
-        label: "Step history",
+        label: isGroup(step) ? "Group history" : "Step history",
         onClick: () =>
           void action(async () =>
             setHistory({
-              entities: [{ type: "template_item", id: step.id }],
+              entities: [{ type: isGroup(step) ? "template_group" : "template_item", id: step.id }],
               readOnly: step.inherited,
             }),
           ),
@@ -329,22 +345,23 @@ export function TemplateWorkspace({
           ]
         : []),
       {
-        label: "Remove step",
+        label: isGroup(step) ? "Remove group" : "Remove step",
         disabled: !editable,
         danger: true,
         onClick: () =>
           action(async () => {
             if (
               !window.confirm(
-                step.kind === "global"
+                isGroup(step) ? "Remove this group and all its template-owned branches and descendants? Client-owned additions will remain visibly unplaced; history can recover this subtree." : step.kind === "global"
                   ? "Remove this standard step? Org-local steps anchored to it will remain unplaced until repaired."
                   : "Remove this local step? It will remain recoverable in template history.",
               )
             )
               return;
             await api(
-              `/api/templates/${data.templateId}/items?itemId=${step.id}`,
+              isGroup(step) ? `/api/templates/${data.templateId}/groups/${step.id}` : `/api/templates/${data.templateId}/items?itemId=${step.id}`,
               "DELETE",
+              isGroup(step) ? { expectedVersion: versions.get(step.id) } : undefined,
             );
             await reload();
             setSelectedId("");
@@ -353,7 +370,7 @@ export function TemplateWorkspace({
       },
     ];
   }
-  async function addStep() {
+  async function addStep(parentBranchId: string | null = null) {
     await action(async () => {
       const result = await api(
         `/api/templates/${data.templateId}/items`,
@@ -364,10 +381,11 @@ export function TemplateWorkspace({
               ? "Untitled standard step"
               : "Untitled local step",
           body: doc("Describe the work to complete."),
+          parentBranchId,
           ...(data.scope === "organization"
             ? {
-                placement: selected?.inherited ? "after" : "end",
-                anchorItemId: selected?.inherited ? selected.id : null,
+                placement: !parentBranchId && selected?.inherited && !selected.parentBranchId ? "after" : "end",
+                anchorItemId: !parentBranchId && selected?.inherited && !selected.parentBranchId ? selected.id : null,
               }
             : {}),
         },
@@ -376,6 +394,39 @@ export function TemplateWorkspace({
       setSelectedId(result.data.id);
       setContext(null);
     });
+  }
+  function openGroup(parentBranchId: string | null = null) {
+    if (!fields.length) { setError("Approve an enabled scalar text, number, or Boolean organization field in Variables first."); return; }
+    setNewGroup({ parentBranchId, title: "Conditional group", condition: defaultComparison(fields[0]) });
+  }
+  function updateBranch(groupId: string, branchId: string, condition: Comparison) {
+    if (!canEdit || busy || data.steps.find((row) => row.id === groupId)?.inherited) return;
+    const payload = { condition };
+    drafts.set(branchId, payload);
+    setContext(null);
+    setData((current) => ({ ...current, branches: current.branches?.map((row) => row.id === branchId ? { ...row, condition } : row) }));
+    queue.schedule(branchId, `/api/templates/${data.templateId}/groups/${groupId}/branches/${branchId}`, payload);
+  }
+  function branchActions(group: WorkspaceStep, branchId: string): MenuAction[] {
+    const branches = (data.branches ?? []).filter((row) => row.groupItemId === group.id).sort((a,b) => a.position-b.position);
+    const index = branches.findIndex((row) => row.id === branchId), editable = canEdit && !group.inherited && !busy;
+    return [
+      { label: "Inspect rule", onClick: () => setSelectedId(group.id) },
+      ...[-1,1].map((direction) => ({ label: direction < 0 ? "Move branch up" : "Move branch down",
+        disabled: !editable || !branches[index+direction] || branches[index].condition === null || branches[index+direction].condition === null,
+        onClick: () => action(async () => {
+          const order = branches.map((row) => row.id);
+          [order[index], order[index+direction]] = [order[index+direction], order[index]];
+          await api(`/api/templates/${data.templateId}/groups/${group.id}`, "PATCH", { branchOrder: order, expectedVersion: versions.get(group.id) });
+          await reload(); setContext(null);
+        }) })),
+      { label: "Remove branch", danger: true, disabled: !editable || branches.filter((row) => row.condition !== null).length === 1 && branches[index].condition !== null,
+        onClick: () => action(async () => {
+          if (!window.confirm("Remove this branch and its template-owned descendants? Client-owned additions remain unplaced and must be repaired.")) return;
+          await api(`/api/templates/${data.templateId}/groups/${group.id}/branches/${branchId}`, "DELETE", { expectedVersion: versions.get(group.id) });
+          await reload(); setContext(null);
+        }) },
+    ];
   }
   const templateActions: MenuAction[] = [
     {
@@ -632,7 +683,7 @@ export function TemplateWorkspace({
                           : "Review validation"
                         : "Validation unavailable"
                       : "Select an organization to validate"}{" "}
-                    · {ordered.length} steps
+                    · {ordered.filter((node) => !isGroup(node)).length} steps
                   </p>
                 </div>
                 <ActionMenu
@@ -664,10 +715,7 @@ export function TemplateWorkspace({
                       !canEdit
                     )
                       return;
-                    if (
-                      target &&
-                      (target.id === "start" || target.id === "end")
-                    ) {
+                    if (target && (target.id === "start" || target.id === "end" || String(target.id).startsWith("branch:"))) {
                       void reorder(
                         String(source.id),
                         String(target.id),
@@ -675,8 +723,7 @@ export function TemplateWorkspace({
                       );
                       return;
                     }
-                    if (source.index === source.initialIndex) return;
-                    const destination = ordered[source.index];
+                    const destination = target ? ordered.find((row) => row.id === String(target.id)) : ordered[source.index];
                     if (destination)
                       void reorder(
                         String(source.id),
@@ -685,9 +732,7 @@ export function TemplateWorkspace({
                       );
                   }}
                 >
-                  {data.scope === "organization" && (
-                    <DropZone id="start" disabled={!canEdit || busy} />
-                  )}
+                  {canEdit && <BranchDropZone id="start" disabled={busy} label="Unconditional start — drop here" />}
                   {!ordered.length && (
                     <p className="py-8 text-center text-sm text-slate-500">
                       No steps yet.{" "}
@@ -696,11 +741,14 @@ export function TemplateWorkspace({
                         : "Add a standard step to begin."}
                     </p>
                   )}
-                  {ordered.map((step, index) => (
+                  <ConditionalCanvas data={data} context={context} canEdit={canEdit} disabled={busy}
+                    onAdd={(branchId, group) => group ? openGroup(branchId) : void addStep(branchId)}
+                    branchActions={branchActions}
+                    row={(step) => (
                     <StepRow
                       key={step.id}
                       step={step}
-                      index={index}
+                      index={ordered.findIndex((row) => row.id === step.id)}
                       selected={selected?.id === step.id}
                       disabled={!canEdit || busy}
                       onSelect={() => setSelectedId(step.id)}
@@ -709,10 +757,8 @@ export function TemplateWorkspace({
                         .filter((row) => row.inherited)
                         .map((row) => row.id)}
                     />
-                  ))}
-                  {data.scope === "organization" && (
-                    <DropZone id="end" disabled={!canEdit || busy} />
-                  )}
+                  )} />
+                  {canEdit && <BranchDropZone id="end" disabled={busy} label="Unconditional end — drop here" />}
                 </DragDropProvider>
                 {dropHint && (
                   <p
@@ -726,7 +772,7 @@ export function TemplateWorkspace({
                   <button
                     className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed p-4 text-sm text-teal-800"
                     disabled={busy}
-                    onClick={addStep}
+                    onClick={() => void addStep()}
                   >
                     <Plus size={16} />
                     {data.scope === "global"
@@ -734,6 +780,7 @@ export function TemplateWorkspace({
                       : "Add local step"}
                   </button>
                 )}
+                {canEdit && <button className={button + " w-full"} disabled={busy} onClick={() => openGroup()}>+ Add conditional group</button>}
               </div>
             </div>
           ) : !orgId ? (
@@ -792,7 +839,7 @@ export function TemplateWorkspace({
           <div className="flex justify-between">
             <div>
               <p className="text-[10px] uppercase tracking-widest text-slate-400">
-                Step inspector
+                {selected && isGroup(selected) ? "Conditional group inspector" : "Step inspector"}
               </p>
               <p className="mt-2 text-sm font-semibold">
                 {selected
@@ -817,15 +864,16 @@ export function TemplateWorkspace({
                 </p>
               )}
               <label className="block text-xs">
-                Step title
+                {isGroup(selected) ? "Group title" : "Step title"}
                 <input
-                  aria-label="Step title"
+                  aria-label={isGroup(selected) ? "Group title" : "Step title"}
                   className="mt-2 w-full rounded-xl border p-3"
                   disabled={!owned}
                   value={selected.title}
                   onChange={(event) => update({ title: event.target.value })}
                 />
               </label>
+              {!isGroup(selected) ? <>
               <div>
                 <p className="mb-2 text-xs">Instructions</p>
                 <RichTextEditor
@@ -847,6 +895,22 @@ export function TemplateWorkspace({
                   (definition) => definition.id === selected.repeatVariableId,
                 )}
               />
+              </> : <>
+                <p className="text-xs text-slate-500">First matching branch runs. A reached group without a match blocks creation. Groups do not repeat.</p>
+                {(data.branches ?? []).filter((branch) => branch.groupItemId === selected.id).sort((a,b) => a.position-b.position).map((branch,index) => <section key={branch.id} className="space-y-3 rounded-xl border p-3">
+                  <div className="flex items-center justify-between"><h3 className="text-xs font-bold">{branch.condition === null ? "ELSE" : index === 0 ? "IF" : "ELSE IF"}</h3>
+                    <ActionMenu label={`Rule ${index+1} actions`} actions={branchActions(selected, branch.id)} /></div>
+                  {branch.condition ? <RuleEditor fields={fields} value={branch.condition} disabled={!owned} onChange={(condition) => updateBranch(selected.id, branch.id, condition)} /> : <p className="text-xs">Runs only if all prior comparisons are valid and false.</p>}
+                </section>)}
+                {owned && <div className="flex gap-2">
+                  <button className={button} disabled={!fields.length} onClick={() => fields[0] && setNewBranch({ groupId: selected.id, condition: defaultComparison(fields[0]) })}>Add ELSE IF</button>
+                  <button className={button} disabled={data.branches?.some((branch) => branch.groupItemId === selected.id && branch.condition === null)}
+                    onClick={() => void action(async () => {
+                      await api(`/api/templates/${data.templateId}/groups/${selected.id}/branches`, "POST", { condition: null, expectedVersion: versions.get(selected.id) });
+                      await reload(); setContext(null);
+                    })}>Add ELSE</button>
+                </div>}
+              </>}
               <p className="rounded-xl border p-3 text-xs">
                 {selected.inherited
                   ? "Live inheritance: global changes flow into this org template."
@@ -854,7 +918,8 @@ export function TemplateWorkspace({
                     ? "Local to this org template; never added to a reusable library."
                     : "Owned by this global template."}
               </p>
-              {selected.kind === "org" && (
+              {selected.parentBranchId && <p className="text-xs text-slate-500">Inside a conditional branch. Use Move to… to change branch or place outside all conditions.</p>}
+              {selected.kind === "org" && !selected.parentBranchId && (
                 <label className="block text-xs">
                   Placement
                   <select
@@ -912,6 +977,44 @@ export function TemplateWorkspace({
           )}
         </aside>
       </div>
+      {newGroup && <Modal title="Add conditional group" onClose={() => setNewGroup(null)}>
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action(async () => {
+          const result = await api(`/api/templates/${data.templateId}/groups`, "POST", {
+            ...newGroup, ...(data.scope === "organization" ? { placement: "end", anchorItemId: null } : {}),
+          });
+          await reload(); setSelectedId(result.data.id); setNewGroup(null); setContext(null);
+        }); }}>
+          <label className="block text-sm">Group title<input required aria-label="New group title" maxLength={240} className="mt-2 w-full rounded-xl border p-3" value={newGroup.title} onChange={(event) => setNewGroup({ ...newGroup, title: event.target.value })} /></label>
+          <RuleEditor fields={fields} value={newGroup.condition} disabled={busy} onChange={(condition) => setNewGroup({ ...newGroup, condition })} />
+          <button className={primary} disabled={busy}>Create group</button>
+        </form>
+      </Modal>}
+      {newBranch && <Modal title="Add ELSE IF branch" onClose={() => setNewBranch(null)}>
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void action(async () => {
+          await api(`/api/templates/${data.templateId}/groups/${newBranch.groupId}/branches`, "POST", { condition: newBranch.condition, expectedVersion: versions.get(newBranch.groupId) });
+          await reload(); setNewBranch(null); setContext(null);
+        }); }}>
+          <RuleEditor fields={fields} value={newBranch.condition} disabled={busy} onChange={(condition) => setNewBranch({ ...newBranch, condition })} />
+          <button className={primary} disabled={busy}>Add branch</button>
+        </form>
+      </Modal>}
+      {moveId && <Modal title="Move content to…" onClose={() => setMoveId(null)}>
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault();
+          const [side, ...parts] = destination.split("|");
+          void reorder(moveId, parts.join("|"), side === "before" ? "before" : "after").then(() => setMoveId(null));
+        }}>
+          <label className="block text-sm">Destination<select aria-label="Move destination" className="mt-2 w-full rounded-xl border p-3" value={destination === "end" ? "before|end" : destination} onChange={(event) => setDestination(event.target.value)}>
+            <option value="after|start">Unconditional start</option><option value="before|end">Unconditional end</option>
+            {(data.branches ?? []).flatMap((branch) => ["start","end"].map((side) => {
+              const owner = data.steps.find((row) => row.id === branch.groupItemId);
+              return <option key={branch.id+side} value={`after|branch:${branch.id}:${side}`}>{owner?.title} / {branch.condition === null ? "ELSE" : branch.condition.variableKey + " = " + String(branch.condition.value)} / {side}</option>;
+            }))}
+            {ordered.filter((node) => node.id !== moveId).flatMap((node) => ["before","after"].map((side) => <option key={side+node.id} value={`${side}|${node.id}`}>{side}: {node.title}</option>))}
+          </select></label>
+          <p className="text-xs text-slate-500">A group moves with all descendants. Inherited nodes stay read-only. Moves into a group’s own descendants are rejected.</p>
+          <button className={primary} disabled={busy}>Move</button>
+        </form>
+      </Modal>}
       {variable && selected && owned && (
         <VariableTokenPicker
           definitions={data.definitions}
@@ -1011,23 +1114,6 @@ export function TemplateWorkspace({
     </WorkspaceShell>
   );
 }
-function DropZone({
-  id,
-  disabled,
-}: {
-  id: "start" | "end";
-  disabled: boolean;
-}) {
-  const { ref, isDropTarget } = useDroppable({ id, disabled });
-  return (
-    <div
-      ref={ref}
-      className={`rounded-xl border border-dashed p-3 text-center text-xs ${isDropTarget ? "border-teal-500 bg-teal-50" : "text-slate-400"}`}
-    >
-      Drop a local step at the {id}
-    </div>
-  );
-}
 function StepRow({
   step,
   index,
@@ -1075,7 +1161,7 @@ function StepRow({
       <button className="min-w-0 text-left" onClick={onSelect}>
         <span className="text-sm font-semibold">{step.title}</span>
         <span className="ml-2 inline-block rounded-full border px-2 py-1 text-[10px] text-teal-800">
-          {step.inherited
+          {isGroup(step) ? `${step.inherited ? "Inherited" : step.kind === "org" ? "Local" : "Standard"} · conditional group` : step.inherited
             ? "Inherited"
             : step.kind === "org"
               ? "Local"

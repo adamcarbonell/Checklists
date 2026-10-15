@@ -9,6 +9,35 @@ import { seedVariableDefinitions } from "./seed";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { applyMigrations } from "./migration-runner";
 describe("redesign cutover safety", () => {
+  it("adds conditional schema without changing existing content, progress, mappings, or history", async () => {
+    const client = new PGlite();
+    try {
+      const db = drizzle(client, { schema }) as unknown as Database;
+      const migrations = readMigrationFiles({ migrationsFolder: "drizzle" });
+      await applyMigrations(db,migrations.slice(0,2),["--confirm-template-reset"]);
+      const actor = "00000000-0000-4000-8000-000000000001", org = "00000000-0000-4000-8000-000000000002";
+      const parent = "00000000-0000-4000-8000-000000000003", child = "00000000-0000-4000-8000-000000000004", step = "00000000-0000-4000-8000-000000000005";
+      const run = "00000000-0000-4000-8000-000000000006";
+      await client.exec(`INSERT INTO users(id,entra_subject,email,name,role) VALUES ('${actor}','migration','test@example.test','Test','viewer');
+        INSERT INTO organizations(id,itglue_id,name) VALUES ('${org}','1','Client');
+        INSERT INTO templates(id,name,scope) VALUES ('${parent}','Existing parent','global');
+        INSERT INTO templates(id,name,scope,organization_id,global_template_id) VALUES ('${child}','Existing child','organization','${org}','${parent}');
+        INSERT INTO template_items(id,template_id,title,body,position,version) VALUES ('${step}','${parent}','Keep spaces  ','{"type":"doc"}',100,7);
+        INSERT INTO revisions(entity_type,entity_id,snapshot,action) VALUES ('template_item','${step}','{"title":"Before","position":100}','update');
+        INSERT INTO checklists(id,name,organization_id,organization_name,template_id,template_name,global_template_id,template_version,global_template_version,variable_snapshot,creation_key,created_by)
+          VALUES ('${run}','Frozen','${org}','Client','${child}','Existing child','${parent}',1,1,'{"org.test":{"value":"kept"}}','00000000-0000-4000-8000-000000000007','${actor}');
+        INSERT INTO checklist_steps(checklist_id,source_item_id,position,title,body,status,notes,version) VALUES ('${run}','${step}',1,'Frozen instructions','{"type":"doc"}','completed','Keep notes',3);
+        INSERT INTO checklist_activity(checklist_id,actor_user_id,event,changes) VALUES ('${run}','${actor}','created','{"stepCount":1}');`);
+      await seedVariableDefinitions(db);
+      const tables=["templates","revisions","checklists","checklist_steps","checklist_activity","variable_definitions","organizations","users","audit_events"];
+      const before=await Promise.all(tables.map(async(table)=>(await client.query(`SELECT * FROM ${table} ORDER BY id`)).rows));
+      expect(await applyMigrations(db,migrations,[])).toBe(1);
+      expect(await applyMigrations(db,migrations,[])).toBe(0);
+      expect(await Promise.all(tables.map(async(table)=>(await client.query(`SELECT * FROM ${table} ORDER BY id`)).rows))).toEqual(before);
+      expect(await db.select().from(schema.templateItems)).toMatchObject([{id:step,title:"Keep spaces  ",version:7,nodeType:"step",parentBranchId:null}]);
+      expect(await db.select().from(schema.templateBranches)).toEqual([]);
+    } finally { await client.close(); }
+  },30000);
   it("journals the reset atomically and does not replay it on a later release", async () => {
     const client = new PGlite();
     try {
@@ -24,7 +53,7 @@ describe("redesign cutover safety", () => {
       ]);
       expect(
         await applyMigrations(db, migrations, ["--confirm-template-reset"]),
-      ).toBe(1);
+      ).toBe(2);
       await db
         .insert(schema.templates)
         .values({ name: "New template", scope: "global" });
@@ -34,7 +63,7 @@ describe("redesign cutover safety", () => {
       ]);
       expect(
         (await client.query("SELECT * FROM public.__drizzle_migrations")).rows,
-      ).toHaveLength(2);
+      ).toHaveLength(3);
     } finally {
       await client.close();
     }
@@ -73,6 +102,7 @@ describe("redesign cutover safety", () => {
         "utf8",
       );
       await client.exec("BEGIN;" + migration + "COMMIT;");
+      await client.exec(await readFile("drizzle/0002_conditional_groups.sql", "utf8"));
       const db = drizzle(client, { schema }) as unknown as Database;
       await seedVariableDefinitions(db);
       await seedVariableDefinitions(db);

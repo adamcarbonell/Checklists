@@ -8,6 +8,7 @@ const entry = z
     itemId: z.uuid(),
     position: z.int().min(0),
     anchorItemId: z.uuid().nullable(),
+    parentBranchId: z.uuid().nullable().optional(),
     placement: z.enum(["start", "end", "before", "after"]).nullable(),
   })
   .strict();

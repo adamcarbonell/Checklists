@@ -58,6 +58,14 @@ export async function api(url: string, method = "GET", body?: unknown) {
   if (!response.ok) {
     const result = await response.json().catch(() => ({}));
     const messages: Record<string, string> = {
+      group_changed_reload: "Someone else changed this group. Your draft is retained; reload the latest version before retrying.",
+      group_membership_changed: "This group’s membership changed. Restore moved/added content first; nothing was overwritten.",
+      group_order_changed: "This group’s saved position conflicts with current content. Resolve the order before restoring.",
+      invalid_condition_field_or_value: "Select an enabled approved scalar field and a literal of the same type.",
+      invalid_structure: "This move would create an invalid structure or cycle. Choose a different branch.",
+      condition_depth_exceeded: "Conditional groups can be nested at most ten levels deep.",
+      if_branch_required: "A group must retain an IF branch.",
+      else_already_exists: "Only one ELSE branch is allowed, and it must be last.",
       template_changed_reload:
         "This template changed in another session. Reload the latest version before retrying.",
       step_changed_reload:

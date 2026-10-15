@@ -17,6 +17,8 @@ import {
 import { restoreOrder } from "@/lib/order-service";
 import { validateRepeatVariable } from "@/lib/repeat-validation";
 import { OrderError } from "@/lib/template-order";
+import { restoreGroup } from "@/lib/conditional-service";
+import { assertTemplateStructure } from "@/lib/template-structure";
 const order = z.object({
   items: z
     .array(
@@ -24,6 +26,7 @@ const order = z.object({
         itemId: z.uuid(),
         position: z.int().min(0),
         anchorItemId: z.uuid().nullable(),
+        parentBranchId: z.uuid().nullable().optional(),
         placement: z.enum(["start", "end", "before", "after"]).nullable(),
       }),
     )
@@ -36,6 +39,7 @@ const metadata = z.object({
 });
 const step = z.object({
   templateId: z.uuid(),
+  parentBranchId: z.uuid().nullable().default(null),
   title: stepTitleSchema,
   body: richDocumentSchema,
   repeatVariableId: z.uuid().nullable(),
@@ -59,7 +63,9 @@ export async function POST(
         .where(eq(revisions.id, id))
         .limit(1);
     if (!revision) throw new OrderError("revision_not_found", 404);
-    if (revision.entityType === "template_order")
+    if (revision.entityType === "template_group")
+      await restoreGroup(revision.snapshot, revision.entityId, access.user.id);
+    else if (revision.entityType === "template_order")
       await restoreOrder(
         revision.entityId,
         order.parse(revision.snapshot).items,
@@ -117,11 +123,13 @@ export async function POST(
             .for("update");
           if (!current || current.templateId !== snapshot.templateId)
             throw new OrderError("step_not_found", 404);
+          if (current.nodeType !== "step") throw new OrderError("group_endpoint_required");
           await validateRepeatVariable(snapshot.repeatVariableId, tx);
           if (template.scope === "global")
             await assertPlacement(tx, template, {
               placement: snapshot.placement,
               anchorItemId: snapshot.anchorItemId,
+              parentBranchId: snapshot.parentBranchId,
             });
           await recordRevision(
             {
@@ -146,6 +154,7 @@ export async function POST(
           const bucket = siblings.filter(
             (item) =>
               item.placement === snapshot.placement &&
+              item.parentBranchId === snapshot.parentBranchId &&
               item.anchorItemId === snapshot.anchorItemId,
           );
           const position = bucket.some(
@@ -160,6 +169,7 @@ export async function POST(
               body: snapshot.body,
               repeatVariableId: snapshot.repeatVariableId,
               anchorItemId: snapshot.anchorItemId,
+              parentBranchId: snapshot.parentBranchId,
               placement: snapshot.placement,
               position,
               deletedAt: snapshot.deletedAt
@@ -170,6 +180,7 @@ export async function POST(
             })
             .where(eq(templateItems.id, current.id));
           await bumpTemplate(tx, template.id);
+          await assertTemplateStructure(tx, template.id, [current.id]);
         } else throw new OrderError("restore_not_supported");
         await recordAudit(
           {

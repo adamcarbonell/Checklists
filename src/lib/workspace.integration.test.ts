@@ -52,6 +52,10 @@ import {
   deleteTemplate,
 } from "./template-service";
 import { loadWorkspace, loadTemplateContext } from "./workspace-data";
+import { createGroup, changeGroup, writeBranch, deleteConditional, restoreGroup } from "./conditional-service";
+import { POST as groupPost } from "@/app/api/templates/[id]/groups/route";
+import { PATCH as groupPatch } from "@/app/api/templates/[id]/groups/[groupId]/route";
+import { POST as branchPost } from "@/app/api/templates/[id]/groups/[groupId]/branches/route";
 import { saveOrder, restoreOrder } from "./order-service";
 import {
   moveStep,
@@ -127,6 +131,7 @@ beforeAll(async () => {
     await readFile("drizzle/0001_template_execution_redesign.sql", "utf8"),
   );
   state.db = drizzle(client, { schema }) as unknown as Database;
+  await client.exec(await readFile("drizzle/0002_conditional_groups.sql", "utf8"));
 }, 30000);
 afterAll(async () => client.close());
 beforeEach(async () => {
@@ -286,7 +291,7 @@ async function changeOrder(
   side: "before" | "after",
 ) {
   const workspace = (await loadWorkspace(id))!,
-    next = moveStep(workspace.steps, moved, target, side);
+    next = moveStep(workspace.steps, moved, target, side, workspace.branches);
   await saveOrder(
     id,
     {
@@ -310,6 +315,131 @@ async function rowCount(
     (await state.db.select({ value: count() }).from(table))[0].value,
   );
 }
+async function conditionalFixture() {
+  const parent = await createTemplate({ scope: "global", name: "Conditional parent" }, state.actor);
+  const child = await createTemplate({ scope: "organization", organizationId: orgA, globalTemplateId: parent.id }, state.actor);
+  const group = await createGroup(parent.id, { title: "Email setup", condition: { variableKey: "org.ad_full_name", operator: "equals", value: "client-a.local" } }, state.actor);
+  const otherwise = await writeBranch(parent.id, group.id, null, { condition: null, expectedVersion: group.version }, state.actor);
+  const selected = await createStep(parent.id, { title: "Selected instructions", body: doc("Do selected work"), parentBranchId: group.branches[0].id }, state.actor);
+  const inactive = await createStep(parent.id, { title: "Inactive {{item.name}}", body: doc("{{org.missing}}"), parentBranchId: otherwise.id, repeatVariableId: apps }, state.actor);
+  return { parent, child, group, otherwise, selected, inactive };
+}
+describe("conditional transactions and inheritance", () => {
+  it("orders branches with ELSE last, deletes only an owned branch subtree, and recovers it", async () => {
+    const f=await conditionalFixture(), rule={variableKey:"org.ad_full_name",operator:"equals" as const,value:"client-b.local"};
+    const next=await writeBranch(f.parent.id,f.group.id,null,{condition:rule,expectedVersion:2},state.actor);
+    let workspace=(await loadWorkspace(f.parent.id))!;
+    expect(workspace.branches?.filter((row)=>row.groupItemId===f.group.id).map((row)=>row.id)).toEqual([f.group.branches[0].id,next.id,f.otherwise.id]);
+    const before=workspace.version;
+    await expect(changeGroup(f.parent.id,f.group.id,{expectedVersion:3,branchOrder:[f.otherwise.id,next.id,f.group.branches[0].id]},state.actor)).rejects.toMatchObject({status:409});
+    expect((await loadWorkspace(f.parent.id))!.version).toBe(before);
+    await changeGroup(f.parent.id,f.group.id,{expectedVersion:3,branchOrder:[next.id,f.group.branches[0].id,f.otherwise.id]},state.actor);
+    const local=await createStep(f.child.id,{title:"Local addition",body:doc("Local"),parentBranchId:f.group.branches[0].id,placement:"end"},state.actor);
+    await deleteConditional(f.parent.id,f.group.id,f.group.branches[0].id,4,state.actor);
+    expect((await loadTemplateContext(f.child.id,orgA))?.issues).toContainEqual({code:"missing_anchor",itemId:local.id});
+    const revisions=await state.db.select().from(schema.revisions).where(eq(schema.revisions.entityId,f.group.id));
+    await restoreGroup(revisions.find((row)=>row.action==="branch_deleted")!.snapshot,f.group.id,state.actor);
+    workspace=(await loadWorkspace(f.parent.id))!;
+    expect(workspace.steps.some((row)=>row.id===f.selected.id)).toBe(true);
+    expect((await loadTemplateContext(f.child.id,orgA))?.valid).toBe(true);
+  });
+  it("enforces nesting limits transactionally", async () => {
+    let container:string|null=null;
+    for(let depth=0;depth<10;depth++) {
+      const group=await createGroup(globalId,{title:"Level "+depth,parentBranchId:container,condition:{variableKey:"org.ad_full_name",operator:"equals",value:"client-a.local"}},state.actor);
+      container=group.branches[0].id;
+    }
+    const before=(await loadWorkspace(globalId))!;
+    await expect(createGroup(globalId,{title:"Too deep",parentBranchId:container,condition:{variableKey:"org.ad_full_name",operator:"equals",value:"client-a.local"}},state.actor)).rejects.toMatchObject({status:409});
+    expect((await loadWorkspace(globalId))!.steps.length).toBe(before.steps.length);
+  });
+  it("preserves root meaning in legacy order revisions and rejects changed membership", async () => {
+    const before=(await loadWorkspace(globalId))!;
+    const original=before.steps.map(stepOrder).map(({parentBranchId:_,...entry})=>{void _;return entry;});
+    const group=await createGroup(globalId,{title:"Group",condition:{variableKey:"org.ad_full_name",operator:"equals",value:"client-a.local"}},state.actor);
+    await expect(restoreOrder(globalId,original,state.actor)).rejects.toMatchObject({status:409});
+    await deleteConditional(globalId,group.id,null,1,state.actor);
+    await restoreOrder(globalId,original,state.actor);
+    expect((await loadWorkspace(globalId))!.steps.every((row)=>row.parentBranchId===null)).toBe(true);
+  });
+  it("matches preview and idempotent frozen output, consulting only active data", async () => {
+    const f = await conditionalFixture();
+    await state.db.update(schema.organizationVariableValues).set({ status: "invalid", issues: ["bad_apps"] }).where(eq(schema.organizationVariableValues.definitionId, apps));
+    const context = (await loadTemplateContext(f.child.id, orgA))!;
+    expect(context.valid).toBe(true);
+    expect(context.variables.find((row)=>row.id===apps)?.used).toBe(false);
+    expect(context.steps.map((row)=>row.title)).toEqual(["Selected instructions"]);
+    const input = { templateId: f.child.id, creationKey: randomUUID() }, run = await createChecklist(input,state.actor);
+    expect((await createChecklist(input,state.actor)).id).toBe(run.id);
+    expect((await loadChecklist(run.id))!.steps.map((row)=>row.body)).toEqual(context.steps.map((row)=>row.body));
+    expect(Object.keys(run.variableSnapshot)).toEqual(["org.ad_full_name"]);
+    expect((await loadActivity(run.id)).data[0].changes.conditionDecisions).toEqual(context.conditionDecisions);
+    await changeStep(f.parent.id,f.selected.id,{ title:"Changed later",expectedVersion:1 },state.actor);
+    expect((await loadChecklist(run.id))!.steps[0].title).toBe("Selected instructions");
+  });
+  it("blocks stale conditions without falling through, creating no partial checklist", async () => {
+    const f = await conditionalFixture();
+    await state.db.update(schema.organizationVariableValues).set({ syncedAt: new Date(Date.now()-86400001) }).where(eq(schema.organizationVariableValues.definitionId,ad));
+    const ctx = (await loadTemplateContext(f.child.id,orgA))!;
+    expect(ctx.conditionDecisions?.[0].status).toBe("blocked");
+    expect(ctx.issues.some((row)=>row.code==="condition_data_invalid")).toBe(true);
+    await expect(createChecklist({templateId:f.child.id,creationKey:randomUUID()},state.actor)).rejects.toMatchObject({status:409});
+    expect(await rowCount(schema.checklists)).toBe(0);
+    expect(await rowCount(schema.checklistActivity)).toBe(0);
+  });
+  it("makes local anchors follow global moves, leaving other org additions untouched", async () => {
+    const f = await conditionalFixture();
+    const local = await createStep(f.child.id,{title:"Client only",body:doc("Local"),placement:"after",anchorItemId:f.selected.id},state.actor);
+    const other = await createTemplate({scope:"organization",organizationId:orgB,globalTemplateId:f.parent.id},state.actor);
+    const localOther = await createStep(other.id,{title:"Other client",body:doc("Other"),parentBranchId:f.group.branches[0].id,placement:"end"},state.actor);
+    expect((await loadTemplateContext(f.child.id,orgA))?.steps.map((row)=>row.title)).toEqual(["Selected instructions","Client only"]);
+    await changeOrder(f.parent.id,f.selected.id,`branch:${f.otherwise.id}:end`,"after");
+    const after = (await loadWorkspace(f.child.id))!.steps.find((row)=>row.id===local.id)!;
+    expect(after.anchorItemId).toBe(f.selected.id);
+    expect(after.parentBranchId).toBeNull();
+    expect((await loadTemplateContext(f.child.id,orgA))?.steps).toHaveLength(0);
+    expect((await loadWorkspace(other.id))!.steps.find((row)=>row.id===localOther.id)?.parentBranchId).toBe(f.group.branches[0].id);
+  });
+  it("soft-deletes owned descendants, preserves client orphans, and restores without discarding changed membership", async () => {
+    const f = await conditionalFixture();
+    const local = await createStep(f.child.id,{title:"Survives deletion",body:doc("Local"),parentBranchId:f.group.branches[0].id,placement:"end"},state.actor);
+    await deleteConditional(f.parent.id,f.group.id,null,2,state.actor);
+    expect((await loadTemplateContext(f.child.id,orgA))!.issues).toContainEqual({code:"missing_anchor",itemId:local.id});
+    expect((await loadWorkspace(f.child.id))!.steps.some((row)=>row.id===local.id)).toBe(true);
+    const revisions=await state.db.select().from(schema.revisions).where(eq(schema.revisions.entityId,f.group.id));
+    const snapshot=revisions.find((row)=>row.action==="delete")!.snapshot;
+    await restoreGroup(snapshot,f.group.id,state.actor);
+    expect((await loadTemplateContext(f.child.id,orgA))?.valid).toBe(true);
+    await createStep(f.parent.id,{title:"New member",body:doc("New"),parentBranchId:f.group.branches[0].id},state.actor);
+    const countBefore = await rowCount(schema.revisions);
+    await expect(restoreGroup(snapshot,f.group.id,state.actor)).rejects.toMatchObject({status:409});
+    expect(await rowCount(schema.revisions)).toBe(countBefore);
+  });
+  it("rejects inherited mutations, invalid comparisons, stale rules, and viewer authoring", async () => {
+    const f=await conditionalFixture();
+    await expect(changeGroup(f.child.id,f.group.id,{title:"No",expectedVersion:2},state.actor)).rejects.toMatchObject({status:403});
+    await expect(writeBranch(f.child.id,f.group.id,null,{condition:null,expectedVersion:2},state.actor)).rejects.toMatchObject({status:403});
+    await expect(changeStep(f.parent.id,f.group.id,{title:"No",expectedVersion:2},state.actor)).rejects.toMatchObject({status:400});
+    await expect(deleteStep(f.parent.id,f.group.id,state.actor)).rejects.toMatchObject({status:400});
+    await expect(changeGroup(f.parent.id,f.group.id,{title:"Stale",expectedVersion:1},state.actor)).rejects.toMatchObject({status:409});
+    await expect(createGroup(f.parent.id,{title:"Wrong",condition:{variableKey:"org.applications.name",operator:"equals",value:"App"}},state.actor)).rejects.toMatchObject({status:400});
+    state.role="viewer";
+    expect((await groupPost(request({}),context(f.parent.id))).status).toBe(403);
+    expect((await groupPatch(request({title:"No",expectedVersion:2},"PATCH"),{params:Promise.resolve({id:f.parent.id,groupId:f.group.id})})).status).toBe(403);
+    expect((await branchPost(request({condition:null,expectedVersion:2}),{params:Promise.resolve({id:f.parent.id,groupId:f.group.id})})).status).toBe(403);
+    expect((await createRunRoute(request({templateId:f.child.id,creationKey:randomUUID()}))).status).toBe(201);
+    state.enabled=false;
+    expect((await groupPost(request({}),context(f.parent.id))).status).toBe(401);
+  });
+  it("rejects cycles and foreign branches atomically", async () => {
+    const f=await conditionalFixture(), before=(await loadWorkspace(f.parent.id))!, revisionCount=await rowCount(schema.revisions);
+    await expect(saveOrder(f.parent.id,{movedItemId:f.group.id,expectedVersion:before.version,expectedParentVersion:null,
+      expectedOrder:before.steps.map(stepOrder),proposedOrder:before.steps.map((row)=>({...stepOrder(row),parentBranchId:row.id===f.group.id ? f.group.branches[0].id : row.parentBranchId}))},state.actor)).rejects.toMatchObject({status:409});
+    expect((await loadWorkspace(f.parent.id))!.version).toBe(before.version);
+    expect(await rowCount(schema.revisions)).toBe(revisionCount);
+    await expect(createStep(childA,{title:"Foreign",body:doc("No"),parentBranchId:f.group.branches[0].id},state.actor)).rejects.toMatchObject({status:409});
+  });
+});
 describe("template inheritance and local ownership", () => {
   it("preserves step-title spaces through creation, autosave, and workspace reloads", async () => {
     const createdResponse = await itemPost(request({ title: "O365 - ", body: doc("Instructions") }), context(globalId));

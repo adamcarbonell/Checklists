@@ -253,6 +253,21 @@ beforeEach(() => {
           currentContext = structuredClone(templateContext);
           result = { data: { status: "valid" } };
         }
+        else if (url.includes("/groups/") && method === "PATCH") {
+          const parts=url.split("/"), groupId=parts[5], branchId=parts[7];
+          const group=workspace.steps.find((row)=>row.id===groupId)!;
+          if (forceConflict) { forceConflict=false; return Response.json({error:"group_changed_reload"},{status:409}); }
+          group.version++; workspace.version++;
+          if(branchId) workspace.branches=workspace.branches?.map((row)=>row.id===branchId ? {...row,condition:body.condition} : row);
+          else group.title=body.title ?? group.title;
+          result={data:{...group,groupVersion:group.version,templateVersion:workspace.version}};
+        }
+        else if (url.includes("/groups") && method === "POST") {
+          const group={...fixture.steps[1],id:"new-group",title:body.title,nodeType:"condition_group" as const,placement:"end" as const,anchorItemId:null,parentBranchId:body.parentBranchId,version:1};
+          workspace.steps.push(group);
+          workspace.branches=[...(workspace.branches ?? []),{id:"new-branch",groupItemId:group.id,position:100,condition:body.condition}];
+          workspace.version++; result={data:group};
+        }
         else if (url.includes("/items") && method === "PATCH") {
           const id = new URL(url, "http://local").searchParams.get("itemId")!;
           workspace.version++;
@@ -337,6 +352,64 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("new template authoring", () => {
+  function conditionalWorkspace(inherited=false) {
+    workspace.definitions.push({id:"email",key:"org.email",label:"Email",cardinality:"scalar",enabled:true,schemaValid:true,fieldAliases:["type","location"],requiredFieldAliases:[],fieldKinds:{type:"Text",location:"Text"}});
+    workspace.steps.unshift({...fixture.steps[1],id:"group",title:"Email setup",nodeType:"condition_group",inherited,kind:inherited ? "global" : "org",templateId:inherited ? "parent" : "child",placement:inherited ? null : "end",anchorItemId:null});
+    workspace.steps[2]={...workspace.steps[2],parentBranchId:"if",placement:"end",anchorItemId:null};
+    workspace.branches=[{id:"if",groupItemId:"group",position:100,condition:{variableKey:"org.email.type",operator:"equals",value:"Office 365"}},{id:"else",groupItemId:"group",position:200,condition:null}];
+    currentContext.conditionDecisions=[{groupId:"group",status:"selected",selectedBranchId:"if",evaluated:[]}];
+  }
+  it("shows all branches, decision badges, and conditional rules without executable group instructions", async () => {
+    conditionalWorkspace();
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    expect(await screen.findByText("Selected")).toBeTruthy();
+    expect(screen.getByText("Not selected")).toBeTruthy();
+    expect(screen.getByRole("textbox",{name:"Group title"})).toBeTruthy();
+    expect(screen.queryByRole("textbox",{name:"Instructions"})).toBeNull();
+    expect(screen.getByText("Empty branch — intentional no-op")).toBeTruthy();
+  });
+  it("serializes title and rule autosaves with the current group version across selection changes", async () => {
+    conditionalWorkspace();
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    fireEvent.change(screen.getByRole("textbox",{name:"Group title"}),{target:{value:"Email setup  "}});
+    fireEvent.change(screen.getByRole("textbox",{name:"Condition value"}),{target:{value:"GSuite "}});
+    fireEvent.click(screen.getByRole("button",{name:/^Local client step/}));
+    await waitFor(()=>expect(requests.filter((row)=>row.method==="PATCH")).toHaveLength(2),{timeout:2000});
+    expect(requests.filter((row)=>row.method==="PATCH")).toMatchObject([
+      {url:"/api/templates/child/groups/group",body:{title:"Email setup  ",expectedVersion:1}},
+      {url:"/api/templates/child/groups/group/branches/if",body:{condition:{value:"GSuite "},expectedVersion:2}},
+    ]);
+  });
+  it("keeps failed rule drafts and blocks navigation instead of discarding them", async () => {
+    conditionalWorkspace(); forceConflict=true;
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    fireEvent.change(screen.getByRole("textbox",{name:"Condition value"}),{target:{value:"Unsaved input "}});
+    await screen.findByText(/Your unsaved edits remain/);
+    expect((screen.getByRole("textbox",{name:"Condition value"}) as HTMLInputElement).value).toBe("Unsaved input ");
+    expect(screen.getByText("Save failed")).toBeTruthy();
+  });
+  it("lets editors add local content inside inherited branches but prevents editing their rules", async () => {
+    conditionalWorkspace(true);
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    expect((screen.getByRole("textbox",{name:"Condition value"}) as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(screen.getAllByRole("button",{name:"+ Add local step"})[0]);
+    await waitFor(()=>expect(requests.some((row)=>row.method==="POST")).toBe(true));
+    expect(requests.find((row)=>row.method==="POST")).toMatchObject({url:"/api/templates/child/items",body:{parentBranchId:"if",placement:"end",anchorItemId:null}});
+  });
+  it("creates a group with a typed rule and keeps viewers read-only", async () => {
+    conditionalWorkspace();
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    fireEvent.click(screen.getAllByRole("button",{name:"+ Add conditional group"}).at(-1)!);
+    fireEvent.change(screen.getByRole("textbox",{name:"New group title"}),{target:{value:"Email choice"}});
+    const values=screen.getAllByRole("textbox",{name:"Condition value"});
+    fireEvent.change(values.at(-1)!,{target:{value:"Office 365"}});
+    fireEvent.click(screen.getByRole("button",{name:"Create group"}));
+    await waitFor(()=>expect(requests.some((row)=>row.url==="/api/templates/child/groups"&&row.method==="POST")).toBe(true));
+    cleanup();
+    render(<TemplateWorkspace initialData={workspace} user={viewer} />);
+    expect((screen.getByRole("textbox",{name:"Group title"}) as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByRole("button",{name:"+ Add conditional group"})).toBeNull();
+  });
   it("keeps inherited steps read-only and exposes editable local instructions", async () => {
     render(<TemplateWorkspace initialData={workspace} user={user} />);
     expect(

@@ -17,6 +17,7 @@ export async function GET(request: Request) {
           "template",
           "template_item",
           "template_order",
+          "template_group",
         ]),
         entityId: z.uuid(),
       })
@@ -41,7 +42,7 @@ export async function GET(request: Request) {
             ...(itemIds.length
               ? [
                   and(
-                    eq(revisions.entityType, "template_item"),
+                    inArray(revisions.entityType, ["template_item", "template_group"]),
                     inArray(revisions.entityId, itemIds),
                   ),
                 ]

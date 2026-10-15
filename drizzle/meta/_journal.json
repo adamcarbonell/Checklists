@@ -15,6 +15,13 @@
       "when": 1791846346467,
       "tag": "0001_template_execution_redesign",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792087200000,
+      "tag": "0002_conditional_groups",
+      "breakpoints": true
     }
   ]
 }

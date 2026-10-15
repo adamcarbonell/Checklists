@@ -4,6 +4,8 @@ import { templateItems } from "@/db/schema";
 import { recordAudit, recordRevision } from "./audit";
 import { loadWorkspace } from "./workspace-data";
 import { lockTemplate, bumpTemplate } from "./template-service";
+import { assertPlacement } from "./template-service";
+import { assertTemplateStructure } from "./template-structure";
 import {
   OrderError,
   orderEntry,
@@ -59,17 +61,22 @@ export async function saveOrder(
       workspace.steps.some((step) => step.id === row.itemId && !step.inherited),
     )) {
       const current = workspace.steps.find((step) => step.id === entry.itemId)!;
+      // Legacy unplaced additions may stay visible while another entry is repaired.
+      if (entry.itemId === input.movedItemId || entry.parentBranchId)
+        await assertPlacement(tx, template, entry);
       await tx
         .update(templateItems)
         .set({
           position: entry.position,
           anchorItemId: entry.anchorItemId,
           placement: entry.placement,
+          parentBranchId: entry.parentBranchId ?? null,
           version: current.version + 1,
           updatedAt: new Date(),
         })
         .where(eq(templateItems.id, entry.itemId));
     }
+    await assertTemplateStructure(tx, id, [input.movedItemId]);
     await bumpTemplate(tx, id);
     await recordAudit(
       {
@@ -107,7 +114,7 @@ export async function restoreOrder(
         throw new OrderError("invalid_restored_anchor", 409);
     const buckets = new Map<string, Set<number>>();
     for (const entry of items) {
-      const key = entry.placement + ":" + entry.anchorItemId,
+      const key = entry.placement + ":" + entry.anchorItemId + ":" + (entry.parentBranchId ?? "root"),
         positions = buckets.get(key) ?? new Set<number>();
       if (positions.has(entry.position))
         throw new OrderError("duplicate_position", 409);
@@ -132,6 +139,7 @@ export async function restoreOrder(
           position: entry.position,
           anchorItemId: entry.anchorItemId,
           placement: entry.placement,
+              parentBranchId: entry.parentBranchId ?? null,
           version: row.version + 1,
           updatedAt: new Date(),
         })
@@ -142,6 +150,8 @@ export async function restoreOrder(
           ),
         );
     }
+    for (const entry of items) await assertPlacement(tx, template, entry);
+    await assertTemplateStructure(tx, id, items.map((entry) => entry.itemId));
     await bumpTemplate(tx, id);
     await recordAudit(
       {

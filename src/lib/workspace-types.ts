@@ -1,5 +1,6 @@
 import type { RichNode, RenderIssue, RenderedStep } from "./template-engine";
 import type { AppRole } from "./roles";
+import type { TemplateBranch, ConditionDecision } from "./conditional-types";
 export type WorkspaceUser = { name: string; email: string; role: AppRole };
 export type Placement = "start" | "end" | "before" | "after";
 export type TemplateSummary = {
@@ -12,6 +13,8 @@ export type TemplateSummary = {
   deletedAt?: string | null;
 };
 export type WorkspaceStep = {
+  nodeType?: "step" | "condition_group";
+  parentBranchId?: string | null;
   id: string;
   templateId: string;
   title: string;
@@ -27,6 +30,7 @@ export type WorkspaceStep = {
   version: number;
 };
 export type VariableDefinitionSummary = {
+  fieldKinds?: Record<string, string>;
   id: string;
   key: string;
   label: string;
@@ -37,6 +41,7 @@ export type VariableDefinitionSummary = {
   requiredFieldAliases: string[];
 };
 export type WorkspaceData = {
+  branches?: TemplateBranch[];
   templateId: string;
   templateName: string;
   templateDescription: string;
@@ -57,6 +62,7 @@ export type ContextVariable = VariableDefinitionSummary & {
   used: boolean;
 };
 export type TemplateContext = {
+  conditionDecisions?: ConditionDecision[];
   organizationId: string;
   variables: ContextVariable[];
   issues: RenderIssue[];
