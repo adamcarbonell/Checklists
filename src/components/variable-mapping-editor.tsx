@@ -25,6 +25,32 @@ export function VariableMappingEditor({ initial }: { initial: Definition[] }) {
   const [status, setStatus] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [addingEmail, setAddingEmail] = useState(false);
+  const [emailStatus, setEmailStatus] = useState("");
+  const addEmail = async () => {
+    setAddingEmail(true);
+    setEmailStatus("Finding the Email asset type and validating the three approved fields…");
+    try {
+      const response = await fetch("/api/variables/presets/email", { method: "POST" });
+      const result = await response.json();
+      if (!response.ok) {
+        const messages: Record<string, string> = {
+          email_variable_exists: "An Email mapping already exists. Reload this page to inspect it; it has not been changed.",
+          email_asset_type_not_found: "No asset type named Email or Emails was found. Check its name in IT Glue, then retry.",
+          email_asset_type_ambiguous: "More than one Email asset type was found. No mapping was added; resolve the duplicate type names in IT Glue first.",
+          itglue_not_configured: "The server's IT Glue connection is not configured. No mapping was added.",
+        };
+        setEmailStatus(messages[result.error] ?? "Could not safely identify all three Email fields. Check Type, Service Location, and Inbound Delivery - Spam Filter in IT Glue, then retry. No mapping was added.");
+        return;
+      }
+      setDefinitions((rows) => [...rows, result.data]);
+      setEmailStatus("Email added and schema validated. Refresh the organization’s approved data before using these tokens.");
+    } catch {
+      setEmailStatus("Email creation could not be confirmed. Reload this page before retrying; existing mappings were not overwritten.");
+    } finally {
+      setAddingEmail(false);
+    }
+  };
   const update = (id: string, value: Partial<Definition>) => {
     setDefinitions((rows) =>
       rows.map((row) => (row.id === id ? { ...row, ...value } : row)),
@@ -102,6 +128,20 @@ export function VariableMappingEditor({ initial }: { initial: Definition[] }) {
   };
   return (
     <div className="space-y-4">
+      {!definitions.some((definition) => definition.key === "org.email") && (
+        <section aria-label="Add Email variable" className="rounded-2xl border border-[#d9e2dc] bg-white p-5 shadow-sm">
+          <h2 className="font-semibold">Email variables</h2>
+          <p className="mt-2 text-sm text-slate-600">Add the single Email asset for each organization. Only Type, Service Location, and Inbound Delivery - Spam Filter are approved; domains, credentials, and other traits are excluded.</p>
+          <ul className="mt-3 space-y-1 break-all font-mono text-xs text-teal-800">
+            <li>{"{{org.email.type}}"}</li>
+            <li>{"{{org.email.service_location}}"}</li>
+            <li>{"{{org.email.inbound_delivery_spam_filter}}"}</li>
+          </ul>
+          <p className="mt-3 text-xs text-slate-600">This action reads Email/Emails type and field metadata from IT Glue and creates one mapping in Checklists. It does not read organization records or write to IT Glue. Exactly one active Email record and non-empty values for these three fields are required when syncing.</p>
+          <button type="button" disabled={addingEmail} onClick={addEmail} className="mt-3 inline-flex items-center gap-2 rounded-xl bg-teal-700 px-4 py-2 text-xs font-semibold text-white disabled:opacity-40"><Plus size={14} /> {addingEmail ? "Adding Email…" : "Add Email variable"}</button>
+        </section>
+      )}
+      {emailStatus && <p role="status" className="rounded-xl border bg-teal-50 p-3 text-sm text-teal-950">{emailStatus}</p>}
       {definitions.map((definition) => (
         <section key={definition.id} className="rounded-2xl border border-[#d9e2dc] bg-white p-5 shadow-sm">
           <fieldset disabled={busy[definition.id]}>

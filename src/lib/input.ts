@@ -25,8 +25,14 @@ export const templateCreateSchema = z.object({
 export const templateUpdateSchema = templateCreateSchema
   .partial()
   .refine((value) => Object.keys(value).length > 0);
+// Autosaved text must not be normalized while the user is still typing.
+export const stepTitleSchema = z
+  .string()
+  .min(1)
+  .max(300)
+  .refine((value) => value.trim().length > 0, { message: "title_required" });
 export const stepCreateSchema = z.object({
-  title: z.string().trim().min(1).max(300),
+  title: stepTitleSchema,
   body: richDocumentSchema,
   repeatVariableId: z.uuid().nullable().optional(),
 });

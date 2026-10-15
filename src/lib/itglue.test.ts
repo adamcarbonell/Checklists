@@ -15,7 +15,7 @@ describe("IT Glue client safety", () => {
     });
     const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: preview, fetcher });
     const result = await client.getFlexibleAssetType("107504");
-    expect(preview).toHaveBeenCalledWith(expect.objectContaining({ method: "GET", endpoint: "/flexible_asset_types", filters: { id: "107504" }, includes: ["flexible_asset_fields"], projectedFields: ["id", "name", "fields.name-key", "fields.kind"], possibleSideEffects: "none-read-only" }));
+    expect(preview).toHaveBeenCalledWith(expect.objectContaining({ method: "GET", endpoint: "/flexible_asset_types", filters: { id: "107504" }, includes: ["flexible_asset_fields"], projectedFields: ["id", "name", "fields.name", "fields.name-key", "fields.kind"], possibleSideEffects: "none-read-only" }));
     expect(result).toEqual({ id: "107504", name: "Active Directory", fields: [{ key: "ad-full-name", name: "AD Full Name", kind: "Text" }] });
     expect(JSON.stringify(result)).not.toContain("discard-me");
   });
@@ -27,7 +27,7 @@ describe("IT Glue client safety", () => {
 
   it("previews a narrow read-only request and discards unselected traits", async () => {
     const preview = vi.fn(async () => undefined);
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "1", attributes: { name: "AD", traits: { "ad-full-name": "acme.local", password: "discard-me" } } }], meta: { "total-count": 1 } }), { status: 200 }));
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "1", attributes: { archived: false, name: "AD", traits: { "ad-full-name": "acme.local", password: "discard-me" } } }], meta: { "total-count": 1 } }), { status: 200 }));
     const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: preview, fetcher });
     const result = await client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields });
     expect(preview).toHaveBeenCalledWith(expect.objectContaining({ method: "GET", endpoint: "/flexible_assets", resultLimit: 1000, possibleSideEffects: "none-read-only" }));
@@ -42,7 +42,7 @@ describe("IT Glue client safety", () => {
 
   it("projects explicitly approved application fields without retaining other traits", async () => {
     const preview = vi.fn(async () => undefined);
-    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: preview, fetcher: async () => Response.json({ data: [{ id: "1", attributes: { name: "Adobe Photoshop Productivity Latest", traits: { name: "Adobe Photoshop", version: "Latest", category: "Productivity", password: "discard-me" } } }] }) });
+    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: preview, fetcher: async () => Response.json({ data: [{ id: "1", attributes: { archived: false, name: "Adobe Photoshop Productivity Latest", traits: { name: "Adobe Photoshop", version: "Latest", category: "Productivity", password: "discard-me" } } }] }) });
     const fields = [{ sourceKey: "name", alias: "name", expectedKind: "Text" }, { sourceKey: "traits.name", alias: "app_name", expectedKind: "Text" }, { sourceKey: "version", alias: "version", expectedKind: "Text" }];
     const result = await client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107505", selectedFields: fields });
     expect(result[0].fields).toEqual({ name: "Adobe Photoshop Productivity Latest", app_name: "Adobe Photoshop", version: "Latest" });
@@ -52,7 +52,7 @@ describe("IT Glue client safety", () => {
   });
 
   it("accepts exactly 1,000 records without a next page", async () => {
-    const data = Array.from({ length: 1000 }, (_, index) => ({ id: String(index), attributes: { traits: { "ad-full-name": `domain-${index}` } } }));
+    const data = Array.from({ length: 1000 }, (_, index) => ({ id: String(index), attributes: { archived: false, traits: { "ad-full-name": `domain-${index}` } } }));
     const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: async () => undefined, fetcher: async () => new Response(JSON.stringify({ data, meta: { "total-count": 1000 } }), { status: 200 }) });
     await expect(client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields })).resolves.toHaveLength(1000);
   });
@@ -67,10 +67,46 @@ describe("IT Glue client safety", () => {
     const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: async () => undefined, fetcher: async () => {
       calls += 1;
       if (calls === 1) return new Response("", { status: 429, headers: { "retry-after": "0" } });
-      return new Response(JSON.stringify({ data: [{ id: "1", attributes: { archived: true, traits: { "ad-full-name": "old" } } }, { id: "2", attributes: { traits: { "ad-full-name": "new" } } }] }), { status: 200 });
+      return new Response(JSON.stringify({ data: [{ id: "1", attributes: { archived: true, traits: { "ad-full-name": "old" } } }, { id: "2", attributes: { archived: false, traits: { "ad-full-name": "new" } } }] }), { status: 200 });
     } });
     const result = await client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields });
     expect(calls).toBe(2);
     expect(result).toHaveLength(1);
+  });
+
+  it.each([true, "true", "TRUE", "1", 1])("discards archived flag %j before reading any traits", async (archived) => {
+    const preview = vi.fn(async () => undefined);
+    const fetcher = vi.fn(async (input: URL | RequestInfo) => {
+      expect(preview).toHaveBeenCalledOnce();
+      const url = new URL(String(input));
+      expect(url.searchParams.get("filter[organization-id]")).toBe("20");
+      expect(url.searchParams.get("filter[flexible-asset-type-id]")).toBe("107504");
+      expect(url.searchParams.get("page[size]")).toBe("1000");
+      return { ok: true, json: async () => ({ data: [
+        { id: "old", attributes: { archived, get traits() { throw new Error("Archived traits must not be accessed"); } } },
+        { id: "active", attributes: { archived: false, traits: { "ad-full-name": "active.test" } } },
+      ] }) } as Response;
+    });
+    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: preview, fetcher });
+    const assets = await client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields });
+    expect(assets).toMatchObject([{ id: "active", fields: { value: "active.test" } }]);
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, "false", "FALSE", "0", 0])("accepts explicit active flag %j", async (archived) => {
+    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: async () => undefined, fetcher: async () => Response.json({ data: [{ id: "1", attributes: { archived, traits: { "ad-full-name": "active.test" } } }] }) });
+    expect(await client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields })).toMatchObject([{ fields: { value: "active.test" } }]);
+  });
+
+  it.each([undefined, null, "", "unknown", 2, {}])("fails closed for missing or malformed archive status %j", async (archived) => {
+    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: async () => undefined, fetcher: async () => Response.json({ data: [{ id: "1", attributes: { archived, traits: { "ad-full-name": "must-not-import" } } }] }) });
+    await expect(client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields })).rejects.toBeInstanceOf(ItGlueMalformedError);
+  });
+
+  it("does not treat an archived-only response as an active record or bypass the result ceiling", async () => {
+    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: async () => undefined, fetcher: async () => Response.json({ data: [{ id: "old", attributes: { archived: true } }] }) });
+    expect(await client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields })).toEqual([]);
+    const oversized = new ItGlueClient({ apiKey: "test-only", onRequestPreview: async () => undefined, fetcher: async () => Response.json({ data: [{ id: "old", attributes: { archived: true } }], meta: { "total-count": 1001 } }) });
+    await expect(oversized.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields })).rejects.toBeInstanceOf(ItGlueLimitError);
   });
 });

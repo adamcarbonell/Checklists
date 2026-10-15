@@ -10,6 +10,45 @@ const definition = {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("explicit approval of additional variable fields", () => {
+  it("adds only the Email preset on explicit approval and shows its three direct tokens", async () => {
+    const email = {
+      ...definition, id: "email", key: "org.email", label: "Email", assetTypeId: "456789", assetTypeName: "Email", cardinality: "scalar",
+      selectedFields: [
+        { sourceKey: "type", alias: "type", expectedKind: "Select" },
+        { sourceKey: "location", alias: "service_location", expectedKind: "Select" },
+        { sourceKey: "inbound-delivery", alias: "inbound_delivery_spam_filter", expectedKind: "Select" },
+      ], validationRules: { exactRecords: 1, requiredFields: ["type", "service_location", "inbound_delivery_spam_filter"] },
+    };
+    const fetcher = vi.fn(async () => Response.json({ data: email }, { status: 201 }));
+    vi.stubGlobal("fetch", fetcher);
+    render(<VariableMappingEditor initial={[definition]} />);
+    expect(fetcher).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Add Email variable" }));
+    await screen.findByText(/Email added and schema validated/);
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/variables/presets/email", { method: "POST" });
+    expect(screen.queryByRole("button", { name: "Add Email variable" })).toBeNull();
+    expect(screen.getByText("{{org.email.type}}")).toBeTruthy();
+    expect(screen.getByText("{{org.email.service_location}}")).toBeTruthy();
+    expect(screen.getByText("{{org.email.inbound_delivery_spam_filter}}")).toBeTruthy();
+    expect(screen.getByLabelText("IT Glue field key 1 for Applications")).toBeTruthy();
+    expect(screen.queryByText("{{org.email.domains}}")).toBeNull();
+  });
+  it("does not offer to replace an existing Email mapping", () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    render(<VariableMappingEditor initial={[{ ...definition, key: "org.email", label: "Email" }]} />);
+    expect(screen.queryByRole("button", { name: "Add Email variable" })).toBeNull();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("retains existing mappings and shows a safe error when Email discovery fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: "private-error-payload" }, { status: 502 })));
+    render(<VariableMappingEditor initial={[definition]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Email variable" }));
+    await screen.findByText(/Could not safely identify all three Email fields/);
+    expect(screen.getByLabelText("IT Glue field key 1 for Applications")).toBeTruthy();
+    expect(screen.queryByText(/private-error-payload/)).toBeNull();
+    expect((screen.getByRole("button", { name: "Add Email variable" }) as HTMLButtonElement).disabled).toBe(false);
+  });
   it("stages multiple fields without requesting data, saves exact aliases, and requires review then sync", async () => {
     const fetcher = vi.fn(async (url: string, options: RequestInit) => {
       expect(options.method).toBe(url.endsWith("/validate") ? "POST" : "PATCH");

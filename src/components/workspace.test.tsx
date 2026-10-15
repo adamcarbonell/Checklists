@@ -69,6 +69,7 @@ import { TemplateWorkspace } from "./template-workspace";
 import { TemplateCatalog, OrganizationDirectory } from "./template-catalog";
 import { ChecklistBoard } from "./checklist-board";
 import { ChecklistRun } from "./checklist-run";
+import { stepCreateSchema } from "@/lib/input";
 const user = {
     name: "Editor",
     email: "editor@example.test",
@@ -257,7 +258,7 @@ beforeEach(() => {
           workspace.version++;
           workspace.steps = workspace.steps.map((step) =>
             step.id === id
-              ? { ...step, ...body, version: step.version + 1 }
+              ? { ...step, ...body, title: body.title === undefined ? step.title : stepCreateSchema.shape.title.parse(body.title), version: step.version + 1 }
               : step,
           );
           result = {
@@ -430,6 +431,38 @@ describe("new template authoring", () => {
     expect(requests.some((request) => request.url.includes("/sync"))).toBe(
       false,
     );
+  });
+  it("keeps a global step's trailing space and caret through autosave so typing can continue", async () => {
+    workspace = { ...workspace, templateId: "parent", scope: "global", organizationId: null, organizationName: null, parent: null, steps: [{ ...fixture.steps[0], inherited: false }] };
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    const title = screen.getByRole("textbox", { name: "Step title" }) as HTMLInputElement;
+    title.focus();
+    fireEvent.change(title, { target: { value: "O365 - " } });
+    title.setSelectionRange(title.value.length, title.value.length);
+    await waitFor(() => {
+      expect(requests.filter((request) => request.method === "PATCH")).toHaveLength(1);
+      expect(requests.filter((request) => request.url.endsWith("/workspace")).length).toBeGreaterThanOrEqual(2);
+      expect(workspace.steps[0].title).toBe("O365 - ");
+    }, { timeout: 2500 });
+    expect(title.value).toBe("O365 - ");
+    expect(title.selectionStart).toBe("O365 - ".length);
+    fireEvent.change(title, { target: { value: title.value + "User access" } });
+    await waitFor(() => expect(requests.filter((request) => request.method === "PATCH")).toHaveLength(2), { timeout: 2500 });
+    expect(workspace.steps[0].title).toBe("O365 - User access");
+    expect(title.value).toBe("O365 - User access");
+  });
+  it("offers single-record Email field tokens without enabling repetition", async () => {
+    workspace.definitions.push({ id: "email", key: "org.email", label: "Email", cardinality: "scalar", enabled: true, schemaValid: true, fieldAliases: ["type", "service_location", "inbound_delivery_spam_filter"], requiredFieldAliases: ["type", "service_location", "inbound_delivery_spam_filter"] });
+    render(<TemplateWorkspace initialData={workspace} user={user} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Local client step/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Variable" }));
+    expect(screen.getByRole("button", { name: "{{org.email.type}}" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "{{org.email.service_location}}" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "{{org.email.inbound_delivery_spam_filter}}" }));
+    await waitFor(() => expect(requests.some((request) => request.method === "PATCH")).toBe(true), { timeout: 2500 });
+    const saved = requests.find((request) => request.method === "PATCH")!;
+    expect(saved.body?.repeatVariableId).toBeNull();
+    expect(JSON.stringify(saved.body?.body)).toContain("{{org.email.inbound_delivery_spam_filter}}");
   });
   it("shows approved per-record tokens after selecting Applications and saves an inserted field", async () => {
     render(<TemplateWorkspace initialData={workspace} user={user} />);

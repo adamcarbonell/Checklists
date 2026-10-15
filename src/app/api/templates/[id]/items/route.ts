@@ -1,11 +1,16 @@
 import { z } from "zod";
 import { requireRole } from "@/lib/access";
-import { errorResponse, readJson, richDocumentSchema } from "@/lib/input";
+import {
+  errorResponse,
+  readJson,
+  richDocumentSchema,
+  stepTitleSchema,
+} from "@/lib/input";
 import { createStep, changeStep, deleteStep } from "@/lib/template-service";
 import { loadWorkspace } from "@/lib/workspace-data";
 const create = z
   .object({
-    title: z.string().trim().min(1).max(300),
+    title: stepTitleSchema,
     body: richDocumentSchema,
     repeatVariableId: z.uuid().nullable().optional(),
     anchorItemId: z.uuid().nullable().optional(),
@@ -17,7 +22,7 @@ const create = z
   .strict();
 const change = z
   .object({
-    title: z.string().trim().min(1).max(300).optional(),
+    title: stepTitleSchema.optional(),
     body: richDocumentSchema.optional(),
     repeatVariableId: z.uuid().nullable().optional(),
     expectedVersion: z.int().min(1),

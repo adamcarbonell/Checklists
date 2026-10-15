@@ -4,7 +4,11 @@ import { getDatabase } from "@/db/client";
 import { revisions, templates, templateItems } from "@/db/schema";
 import { requireRole } from "@/lib/access";
 import { recordAudit, recordRevision } from "@/lib/audit";
-import { errorResponse, richDocumentSchema } from "@/lib/input";
+import {
+  errorResponse,
+  richDocumentSchema,
+  stepTitleSchema,
+} from "@/lib/input";
 import {
   lockTemplate,
   bumpTemplate,
@@ -32,7 +36,7 @@ const metadata = z.object({
 });
 const step = z.object({
   templateId: z.uuid(),
-  title: z.string().trim().min(1).max(300),
+  title: stepTitleSchema,
   body: richDocumentSchema,
   repeatVariableId: z.uuid().nullable(),
   anchorItemId: z.uuid().nullable(),

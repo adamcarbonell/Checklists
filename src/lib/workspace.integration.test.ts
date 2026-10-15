@@ -87,6 +87,7 @@ import { PATCH as orderPatch } from "@/app/api/templates/[id]/order/route";
 import { POST as restoreRevision } from "@/app/api/revisions/[id]/restore/route";
 import { PATCH as mappingPatch, POST as mappingPost } from "@/app/api/variables/route";
 import { POST as validateMapping } from "@/app/api/variables/[id]/validate/route";
+import { POST as addEmailVariable } from "@/app/api/variables/presets/email/route";
 import { POST as syncRoute } from "@/app/api/organizations/[id]/sync/route";
 import { ItGlueClient } from "./itglue";
 import { syncOrganization } from "./sync-service";
@@ -310,6 +311,36 @@ async function rowCount(
   );
 }
 describe("template inheritance and local ownership", () => {
+  it("preserves step-title spaces through creation, autosave, and workspace reloads", async () => {
+    const createdResponse = await itemPost(request({ title: "O365 - ", body: doc("Instructions") }), context(globalId));
+    expect(createdResponse.status).toBe(201);
+    const created = (await createdResponse.json()).data;
+    expect(created.title).toBe("O365 - ");
+    expect((await loadWorkspace(childA))!.steps.find((step) => step.id === created.id)?.title).toBe("O365 - ");
+    for (const [templateId, itemId] of [[globalId, created.id], [childA, localA]]) {
+      const response = await itemPatch(request({ title: "  O365 - User access  ", expectedVersion: 1 }, "PATCH", `http://localhost/api/items?itemId=${itemId}`), context(templateId));
+      expect(response.status).toBe(200);
+      expect((await response.json()).data.title).toBe("  O365 - User access  ");
+      expect((await loadWorkspace(templateId))!.steps.find((step) => step.id === itemId)?.title).toBe("  O365 - User access  ");
+    }
+  });
+  it("preserves a title's spaces when restoring a step from history", async () => {
+    const created = await createStep(globalId, { title: "O365 - ", body: doc("Instructions") }, state.actor);
+    await deleteStep(globalId, created.id, state.actor);
+    const [revision] = await state.db.select().from(schema.revisions).where(eq(schema.revisions.entityId, created.id));
+    const response = await restoreRevision(new Request("http://localhost/restore", { method: "POST" }), context(revision.id));
+    expect(response.status).toBe(200);
+    expect((await loadWorkspace(globalId))!.steps.find((step) => step.id === created.id)?.title).toBe("O365 - ");
+  });
+  it("rejects blank and overlong autosave titles without changing the stored step", async () => {
+    for (const title of ["", "   ", "\t\n", "x".repeat(301)]) {
+      const response = await itemPatch(request({ title, expectedVersion: 1 }, "PATCH", `http://localhost/api/items?itemId=${first}`), context(globalId));
+      expect(response.status).toBe(400);
+    }
+    const stored = (await loadWorkspace(globalId))!.steps.find((step) => step.id === first)!;
+    expect(stored.title).toBe("Confirm domain");
+    expect(stored.version).toBe(1);
+  });
   it("inherits global content and ordering while isolating client-local instructions", async () => {
     expect(
       visibleOrder((await loadWorkspace(childA))!.steps).map((step) => step.id),
@@ -705,6 +736,168 @@ describe("approved repeated fields", () => {
     } finally { schemaReader.mockRestore(); valueReader.mockRestore(); vi.unstubAllEnvs(); }
   });
 });
+describe("archived IT Glue assets", () => {
+  it.each(["manual", "cron"] as const)("excludes archived AD, Applications and Email during %s syncs", async (trigger) => {
+    vi.stubEnv("ITGLUE_API_KEY", "test-only");
+    const [email] = await state.db.insert(schema.variableDefinitions).values({
+      key: "org.email", label: "Email", assetTypeId: "456789", assetTypeName: "Email", cardinality: "scalar",
+      selectedFields: [
+        { sourceKey: "type", alias: "type", expectedKind: "Select" },
+        { sourceKey: "location", alias: "service_location", expectedKind: "Select" },
+        { sourceKey: "inbound-delivery", alias: "inbound_delivery_spam_filter", expectedKind: "Select" },
+      ], validationRules: { exactRecords: 1, requiredFields: ["type", "service_location", "inbound_delivery_spam_filter"] },
+    }).returning();
+    await createStep(childA, { title: "Email {{org.email.type}}", body: doc("{{org.email.service_location}} / {{org.email.inbound_delivery_spam_filter}}"), placement: "end" }, state.actor);
+    let mode: "mixed" | "unknown" | "archived-only" = "mixed";
+    const fetcher = vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(options?.method).toBe("GET");
+      expect(url.pathname).toBe("/flexible_assets");
+      expect(url.searchParams.get("filter[organization-id]")).toBe("1");
+      expect(url.searchParams.get("page[size]")).toBe("1000");
+      const typeId = url.searchParams.get("filter[flexible-asset-type-id]");
+      const traits = typeId === "107504" ? { "ad-full-name": "active.test" }
+        : typeId === "456789" ? { type: "Office 365", location: "Cloud", "inbound-delivery": "Inky" } : {};
+      const archived = { id: "old-" + typeId, attributes: { archived: true, name: "Archived item - must not import", traits: { "ad-full-name": "archived.test", type: "Retired", location: "Old location", "inbound-delivery": "Retired filter" } } };
+      const active = { id: "active-" + typeId, attributes: { archived: mode === "unknown" ? null : false, name: "Active application", traits } };
+      return Response.json({ data: mode === "archived-only" ? [archived] : [archived, active] });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const values = () => state.db.select().from(schema.organizationVariableValues).where(eq(schema.organizationVariableValues.organizationId, orgA));
+    const actor = trigger === "manual" ? state.actor : undefined;
+    try {
+      expect((await syncOrganization(orgA, trigger, actor)).status).toBe("valid");
+      const firstValues = await values();
+      expect(firstValues.find((value) => value.definitionId === ad)).toMatchObject({ status: "valid", value: "active.test" });
+      expect(firstValues.find((value) => value.definitionId === apps)?.value).toEqual([{ id: "active-107505", name: "Active application" }]);
+      expect(firstValues.find((value) => value.definitionId === email.id)?.value).toEqual({ type: "Office 365", service_location: "Cloud", inbound_delivery_spam_filter: "Inky" });
+      expect(JSON.stringify(firstValues)).not.toMatch(/archived\.test|Retired|Archived item|Old location/);
+      const created = await createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor);
+      const frozen = (await loadChecklist(created.id))!;
+
+      mode = "unknown";
+      expect((await syncOrganization(orgA, trigger, actor)).status).toBe("invalid");
+      for (const previous of firstValues) {
+        const retained = (await values()).find((value) => value.definitionId === previous.definitionId)!;
+        expect(retained.status).toBe("stale");
+        expect(retained.value).toEqual(previous.value);
+        expect(retained.lastGoodAt).toEqual(previous.lastGoodAt);
+      }
+
+      mode = "archived-only";
+      expect((await syncOrganization(orgA, trigger, actor)).status).toBe("invalid");
+      const archivedValues = await values();
+      expect(archivedValues.find((value) => value.definitionId === apps)).toMatchObject({ status: "valid", value: [] });
+      for (const definitionId of [ad, email.id])
+        expect(archivedValues.find((value) => value.definitionId === definitionId)).toMatchObject({ status: "invalid", issues: ["expected_1_records_found_0"] });
+      expect((await loadTemplateContext(childA, orgA))?.invalidVariables).toEqual(expect.arrayContaining(["org.ad_full_name", "org.email"]));
+      expect((await loadTemplateContext(childB, orgB))?.valid).toBe(true);
+      await expect(createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor)).rejects.toMatchObject({ status: 409 });
+      expect((await loadChecklist(created.id))?.steps).toEqual(frozen.steps);
+      expect(JSON.stringify(archivedValues)).not.toMatch(/archived\.test|Retired|Archived item|Old location/);
+      expect(fetcher).toHaveBeenCalledTimes(9);
+    } finally { vi.unstubAllEnvs(); vi.unstubAllGlobals(); }
+  });
+});
+
+describe("single Email variable preset", () => {
+  const emailFields = [
+    { key: "email-platform", name: "Type", kind: "Select" },
+    { key: "hosting-location", name: "Service Location", kind: "Select" },
+    { key: "inbound-delivery", name: "Inbound Delivery - Spam Filter", kind: "Select" },
+  ];
+  function schemaFetch() {
+    vi.stubEnv("ITGLUE_API_KEY", "test-only");
+    const fetcher = vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      expect(options?.method).toBe("GET");
+      const url = new URL(String(input));
+      if (url.pathname === "/flexible_asset_types") return Response.json({ data: url.searchParams.get("filter[name]") === "Email" ? [{ id: "456789", attributes: { name: "Email" } }] : [] });
+      expect(url.pathname).toBe("/flexible_asset_types/456789");
+      return Response.json({
+        data: { id: "456789", attributes: { name: "Email" }, relationships: { "flexible-asset-fields": { data: emailFields.map((_, index) => ({ id: String(index + 1) })) } } },
+        included: emailFields.map((field, index) => ({ id: String(index + 1), type: "flexible-asset-fields", attributes: { name: field.name, "name-key": field.key, kind: field.kind, hint: "discard-metadata" } })),
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    return fetcher;
+  }
+  it("creates one audited, validated mapping without fetching organization records or overwriting another mapping", async () => {
+    const fetcher = schemaFetch();
+    const previous = await state.db.select().from(schema.variableDefinitions);
+    try {
+      const response = await addEmailVariable();
+      expect(response.status).toBe(201);
+      const email = (await response.json()).data;
+      expect(email).toMatchObject({ key: "org.email", assetTypeId: "456789", cardinality: "scalar", schemaValid: true });
+      expect(email.selectedFields).toHaveLength(3);
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(await state.db.select().from(schema.organizationVariableValues).where(eq(schema.organizationVariableValues.definitionId, email.id))).toHaveLength(0);
+      const events = await state.db.select().from(schema.auditEvents);
+      expect(events.filter((event) => event.eventType === "itglue.request.preview")).toHaveLength(3);
+      expect(events.find((event) => event.eventType === "variable_definition.created")?.details).toMatchObject({ key: "org.email", preset: "email" });
+      expect(JSON.stringify(events)).not.toMatch(/test-only|discard-metadata/);
+      expect((await addEmailVariable()).status).toBe(409);
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      const definitions = await state.db.select().from(schema.variableDefinitions);
+      expect(definitions).toHaveLength(previous.length + 1);
+      for (const definition of previous) expect(definitions.find((row) => row.id === definition.id)).toEqual(definition);
+    } finally { vi.unstubAllEnvs(); vi.unstubAllGlobals(); }
+  });
+  it("restricts creation to enabled admins without making IT Glue requests for other roles", async () => {
+    const fetcher = schemaFetch();
+    try {
+      for (const role of ["viewer", "editor"] as const) {
+        state.role = role;
+        expect((await addEmailVariable()).status).toBe(403);
+      }
+      state.role = "admin";
+      state.enabled = false;
+      expect((await addEmailVariable()).status).toBe(401);
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(await state.db.select().from(schema.variableDefinitions).where(eq(schema.variableDefinitions.key, "org.email"))).toHaveLength(0);
+    } finally { vi.unstubAllEnvs(); vi.unstubAllGlobals(); }
+  });
+  it("leaves mappings unchanged when discovery fails and never returns raw API errors", async () => {
+    vi.stubEnv("ITGLUE_API_KEY", "test-only");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("private-upstream-error", { status: 403 })));
+    try {
+      const response = await addEmailVariable();
+      expect(response.status).toBe(502);
+      expect(await response.json()).toEqual({ error: "email_schema_lookup_failed" });
+      expect(await state.db.select().from(schema.variableDefinitions)).toHaveLength(2);
+      expect(JSON.stringify(await state.db.select().from(schema.auditEvents))).not.toMatch(/private-upstream-error|test-only/);
+    } finally { vi.unstubAllEnvs(); vi.unstubAllGlobals(); }
+  });
+  it("syncs only approved Email fields and freezes resolved instructions; pending/stale Email blocks only affected templates", async () => {
+    schemaFetch();
+    const reader = vi.spyOn(ItGlueClient.prototype, "getFlexibleAssets").mockImplementation(async (input) => {
+      if (input.assetTypeId === "107504") return [{ id: "ad", name: "AD", fields: { value: "example.test" } }];
+      if (input.assetTypeId === "107505") return [{ id: "app", name: "App", fields: { name: "App" } }];
+      expect(input.assetTypeId).toBe("456789");
+      expect(input.selectedFields.map((field) => field.sourceKey)).toEqual(emailFields.map((field) => field.key));
+      return [{ id: "email", name: "Office 365", fields: { type: "Office 365", service_location: "Cloud", inbound_delivery_spam_filter: "Inky" } }];
+    });
+    try {
+      const response = await addEmailVariable();
+      const email = (await response.json()).data;
+      await createStep(childA, { title: "Configure {{org.email.type}}", body: doc("{{org.email.service_location}} / {{org.email.inbound_delivery_spam_filter}}"), placement: "end" }, state.actor);
+      expect((await loadTemplateContext(childA, orgA))?.invalidVariables).toContain("org.email");
+      expect((await loadTemplateContext(childB, orgB))?.valid).toBe(true);
+      expect((await syncOrganization(orgA, "manual", state.actor)).status).toBe("valid");
+      const resolved = (await loadTemplateContext(childA, orgA))!;
+      expect(resolved.valid).toBe(true);
+      expect(resolved.steps.at(-1)).toMatchObject({ title: "Configure Office 365", body: doc("Cloud / Inky") });
+      const created = await createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor);
+      const frozen = (await loadChecklist(created.id))!;
+      expect(frozen.variableSnapshot["org.email"].value).toEqual({ type: "Office 365", service_location: "Cloud", inbound_delivery_spam_filter: "Inky" });
+      await state.db.update(schema.organizationVariableValues).set({ value: { type: "Changed" }, syncedAt: new Date(Date.now() - 86400001) }).where(eq(schema.organizationVariableValues.definitionId, email.id));
+      expect((await loadTemplateContext(childA, orgA))?.invalidVariables).toContain("org.email");
+      expect((await loadTemplateContext(childB, orgB))?.valid).toBe(true);
+      expect((await loadChecklist(created.id))?.steps).toEqual(frozen.steps);
+    } finally { reader.mockRestore(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); }
+  });
+});
+
 describe("frozen shared checklists", () => {
   it("freezes resolved variables, inherited/local instructions, repetition and versions", async () => {
     const created = await createChecklist(

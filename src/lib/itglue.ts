@@ -61,7 +61,7 @@ export class ItGlueClient {
     const totalCount = Number(payload.meta?.["total-count"] ?? resources.length);
     if (totalCount > MAX_RECORDS || payload.links?.next) throw new ItGlueLimitError(totalCount);
     return resources
-      .filter((resource) => resource.attributes?.archived !== true)
+      .filter(isActiveAsset)
       .map((resource) => projectAsset(resource, input.selectedFields));
   }
 
@@ -77,8 +77,28 @@ export class ItGlueClient {
     return payload.data.map((resource) => ({ id: resource.id, name: String(resource.attributes?.name ?? "") })).filter((organization) => organization.name);
   }
 
+  async lookupFlexibleAssetTypes(exactName: string) {
+    const name = exactName.trim();
+    if (!name || name.length > 200) throw new Error("An exact asset type name is required.");
+    const limit = 25;
+    await this.onRequestPreview({ method: "GET", endpoint: "/flexible_asset_types", filters: { name }, projectedFields: ["id", "name"], resultLimit: limit, dataSensitivity: "tenant-schema", possibleSideEffects: "none-read-only" });
+    const url = new URL(`${this.baseUrl}/flexible_asset_types`);
+    url.searchParams.set("filter[name]", name);
+    url.searchParams.set("page[size]", String(limit));
+    const payload = await this.request(url);
+    if (!Array.isArray(payload.data)) throw new ItGlueMalformedError("flexible_asset_types_data_not_array");
+    const total = Number(payload.meta?.["total-count"] ?? payload.data.length);
+    if (!Number.isFinite(total) || total < payload.data.length) throw new ItGlueMalformedError("flexible_asset_types_invalid_total");
+    if (total > limit || payload.data.length > limit || payload.links?.next) throw new ItGlueLimitError(total);
+    return payload.data.flatMap((resource) => {
+      const assetName = resource.attributes?.name;
+      if (typeof assetName !== "string" || !/^\d+$/.test(String(resource.id))) throw new ItGlueMalformedError("flexible_asset_type_missing_id_or_name");
+      return assetName.toLowerCase() === name.toLowerCase() ? [{ id: String(resource.id), name: assetName }] : [];
+    });
+  }
+
   async getFlexibleAssetType(id: string) {
-    await this.onRequestPreview({ method: "GET", endpoint: "/flexible_asset_types", filters: { id }, includes: ["flexible_asset_fields"], projectedFields: ["id", "name", "fields.name-key", "fields.kind"], resultLimit: MAX_RECORDS, dataSensitivity: "tenant-schema", possibleSideEffects: "none-read-only" });
+    await this.onRequestPreview({ method: "GET", endpoint: "/flexible_asset_types", filters: { id }, includes: ["flexible_asset_fields"], projectedFields: ["id", "name", "fields.name", "fields.name-key", "fields.kind"], resultLimit: MAX_RECORDS, dataSensitivity: "tenant-schema", possibleSideEffects: "none-read-only" });
     const url = new URL(`${this.baseUrl}/flexible_asset_types/${encodeURIComponent(id)}`);
     url.searchParams.set("include", "flexible_asset_fields");
     const payload = await this.request(url);
@@ -125,6 +145,17 @@ export class ItGlueLimitError extends Error {
   constructor(public readonly totalCount: number) { super(`IT Glue result exceeds the ${MAX_RECORDS}-record safety limit.`); }
 }
 export class ItGlueMalformedError extends Error {}
+
+// Discard archived rows before reading any traits. An absent/unrecognized flag
+// is not evidence that a record is active: fail the refresh and retain last-good
+// data as invalid/stale rather than importing a potentially archived asset.
+function isActiveAsset(resource: JsonApiResource) {
+  const flag = resource?.attributes?.archived;
+  const normalized = typeof flag === "string" ? flag.trim().toLowerCase() : flag;
+  if (normalized === true || normalized === "true" || normalized === 1 || normalized === "1") return false;
+  if (normalized === false || normalized === "false" || normalized === 0 || normalized === "0") return true;
+  throw new ItGlueMalformedError("flexible_asset_archive_status_missing_or_invalid");
+}
 
 function projectAsset(resource: JsonApiResource, fields: SelectedField[]): ProjectedAsset {
   const attributes = resource.attributes ?? {};

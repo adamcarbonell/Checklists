@@ -21,6 +21,22 @@ Only explicitly approved fields are retained and exposed. New fields are not ena
 
 Exception for an explicitly approved, optional Applications `version`: after a successful fresh sync, a blank/null version renders as **Not specified** in repeated instructions. This is a display fallback, not a change to stored IT Glue data. If `version` is listed in the mapping's required fields, it still blocks creation when blank. Unapproved fields and values awaiting refresh never receive this fallback. Validation groups repeated field errors and provides administrators an explicit organization-refresh action; opening a context panel still reads only PostgreSQL.
 
+### Email fields (one asset per organization)
+
+An administrator opens **Variables → Add Email variable**. The app discovers the tenant's **Email** (or **Emails**) flexible asset type and verifies the exact field keys and kinds; no type ID is guessed. It approves only **Type**, **Service Location**, and **Inbound Delivery - Spam Filter**. Domains, credentials, and other traits are not retained. Existing mappings are never overwritten, and a missing/ambiguous type or unsupported field leaves the mapping unchanged.
+
+Refresh the organization's approved data after adding the mapping. Use these tokens directly in a global or local step's title or instructions; no repetition is needed:
+
+- `{{org.email.type}}`
+- `{{org.email.service_location}}`
+- `{{org.email.inbound_delivery_spam_filter}}`
+
+Exactly one non-archived Email record and non-empty values for the three approved fields are required. Missing/duplicate records, invalid data, and stale values block only templates using this variable for the affected organization. Adding the mapping reads schema metadata only; the normal manual/six-hour sync pulls the approved values. No migration, reseeding, secret change, or IT Glue write is needed.
+
+### Archived assets
+
+All manual and scheduled IT Glue variable syncs exclude archived flexible assets before projecting their approved traits. A missing or unrecognized archive flag fails the refresh rather than treating the record as active. If the only AD or Email record is archived, its variable fails the single-record validation; archived Applications are removed from the refreshed list. Last-good values retained after a failed refresh are not marked valid, and existing runnable checklists remain frozen. The public [Flexible Assets GET documentation](https://api.itglue.com/developer/#flexible-assets-index) exposes the `archived` response flag but does not document a server-side archive filter; archived rows may arrive over the API, but are discarded without importing their fields.
+
 ## Included
 
 - Next.js 16, TypeScript, PostgreSQL, Drizzle, Auth.js, Microsoft Entra ID, and TipTap.
