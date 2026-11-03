@@ -23,6 +23,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
       if (!field) return [`missing_field:${selected.sourceKey}`];
       if (["password", "upload"].includes(field.kind.toLowerCase())) return [`disallowed_field_kind:${selected.sourceKey}`];
       if (field.kind && field.kind.toLowerCase() !== selected.expectedKind.toLowerCase()) return [`kind_mismatch:${selected.sourceKey}`];
+      if (selected.transform && (field.kind.toLowerCase() !== "tag" || field.tagType !== "Configurations")) return [`configuration_tag_required:${selected.sourceKey}`];
       return [];
     });
     const schemaValid = issues.length === 0;

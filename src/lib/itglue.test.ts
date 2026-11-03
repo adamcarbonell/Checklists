@@ -1,9 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
 import { ItGlueClient, ItGlueLimitError, ItGlueMalformedError } from "./itglue";
+import { resolveVariable } from "./variable-validation";
 
 const selectedFields = [{ sourceKey: "ad-full-name", alias: "value", expectedKind: "Text" }];
 
 describe("IT Glue client safety", () => {
+  const controllerField = { sourceKey: "primary-domain-controller", alias: "value", expectedKind: "Tag", transform: "first-active-configuration-name" as const };
+
+  it("resolves the first active selected configuration to a scalar name without retaining configuration details", async () => {
+    const preview = vi.fn(async () => undefined);
+    const fetcher = vi.fn(async (url: URL | RequestInfo) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/flexible_assets") return Response.json({ data: [{ id: "1", attributes: { archived: false, traits: { "primary-domain-controller": { values: [{ id: "7", name: "old" }, { id: "8", name: "stale cached label" }, { id: "9" }] } } } }] });
+      const id = path.split("/").at(-1);
+      return Response.json({ data: { id, attributes: { "organization-id": 20, archived: id === "7", name: id === "8" ? "DC-PRIMARY" : "old", password: "discard-me" } } });
+    });
+    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: preview, fetcher });
+    const assets = await client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields: [controllerField] });
+    const result = resolveVariable({ key: "org.primary_domain_controller", cardinality: "scalar", selectedFields: [controllerField], validationRules: { exactRecords: 1, requiredFields: ["value"] } }, assets);
+    expect(result).toMatchObject({ status: "valid", value: "DC-PRIMARY" });
+    expect(assets[0].fields).toEqual({ value: "DC-PRIMARY" });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(preview).toHaveBeenCalledWith(expect.objectContaining({ endpoint: "/configurations", filters: { id: "8", "organization-id": "20" }, projectedFields: ["name", "archived", "organization-id"], resultLimit: 1, possibleSideEffects: "none-read-only" }));
+    expect(JSON.stringify(assets)).not.toContain("discard-me");
+  });
+
+  it.each([null, { values: [] }, { values: [{ id: "7" }] }, [7], 7])("treats empty and all-archived selections as missing: %j", async (selection) => {
+    const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: async () => undefined, fetcher: async (url) => Response.json({ data: new URL(String(url)).pathname === "/flexible_assets" ? [{ id: "1", attributes: { archived: false, traits: { "primary-domain-controller": selection } } }] : { id: "7", attributes: { "organization-id": 20, archived: true, name: "Old" } } }) });
+    const assets = await client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields: [controllerField] });
+    expect(assets[0].fields.value).toBeNull();
+    expect(resolveVariable({ key: "org.primary_domain_controller", cardinality: "scalar", selectedFields: [controllerField], validationRules: { requiredFields: ["value"] } }, assets).status).toBe("invalid");
+  });
+
+  it("rejects configuration responses from another organization or without archive status", async () => {
+    for (const attributes of [{ "organization-id": 99, archived: false, name: "Wrong" }, { "organization-id": 20, name: "Unknown" }]) {
+      const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: async () => undefined, fetcher: async (url) => Response.json({ data: new URL(String(url)).pathname === "/flexible_assets" ? [{ id: "1", attributes: { archived: false, traits: { "primary-domain-controller": 7 } } }] : { id: "7", attributes } }) });
+      await expect(client.getFlexibleAssets({ organizationId: "20", assetTypeId: "107504", selectedFields: [controllerField] })).rejects.toBeInstanceOf(ItGlueMalformedError);
+    }
+  });
   it("validates flexible asset schema from included name-key fields without retaining other metadata", async () => {
     const preview = vi.fn(async () => undefined);
     const fetcher = vi.fn(async (url: URL | RequestInfo) => {
@@ -15,7 +49,7 @@ describe("IT Glue client safety", () => {
     });
     const client = new ItGlueClient({ apiKey: "test-only", onRequestPreview: preview, fetcher });
     const result = await client.getFlexibleAssetType("107504");
-    expect(preview).toHaveBeenCalledWith(expect.objectContaining({ method: "GET", endpoint: "/flexible_asset_types", filters: { id: "107504" }, includes: ["flexible_asset_fields"], projectedFields: ["id", "name", "fields.name", "fields.name-key", "fields.kind"], possibleSideEffects: "none-read-only" }));
+    expect(preview).toHaveBeenCalledWith(expect.objectContaining({ method: "GET", endpoint: "/flexible_asset_types", filters: { id: "107504" }, includes: ["flexible_asset_fields"], projectedFields: ["id", "name", "fields.name", "fields.name-key", "fields.kind", "fields.tag-type"], possibleSideEffects: "none-read-only" }));
     expect(result).toEqual({ id: "107504", name: "Active Directory", fields: [{ key: "ad-full-name", name: "AD Full Name", kind: "Text" }] });
     expect(JSON.stringify(result)).not.toContain("discard-me");
   });

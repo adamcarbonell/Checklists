@@ -27,11 +27,28 @@ export async function syncOrganization(organizationId: string, trigger: "manual"
   }
 
   for (const [assetTypeId, typeDefinitions] of byType) {
-    const selectedFields = [...new Map(typeDefinitions.flatMap((definition) => definition.selectedFields).map((field) => [field.sourceKey, field])).values()];
+    // Definitions may use the same alias (for example, "value") for different
+    // traits or transforms. Keep their projections separate in the shared fetch.
+    const projections = new Map<string, (typeof typeDefinitions)[number]["selectedFields"][number]>();
+    const usedAliases = new Set(typeDefinitions.flatMap((definition) => definition.selectedFields.map((field) => field.alias)));
+    const signature = (field: (typeof typeDefinitions)[number]["selectedFields"][number]) => JSON.stringify([field.sourceKey, field.alias, field.expectedKind, field.transform]);
+    for (const field of typeDefinitions.flatMap((definition) => definition.selectedFields)) {
+      const key = signature(field);
+      if (projections.has(key)) continue;
+      let alias = field.alias;
+      if ([...projections.values()].some((existing) => existing.alias === alias)) {
+        let index = projections.size;
+        do { alias = `projection_${index++}`; } while (usedAliases.has(alias));
+        usedAliases.add(alias);
+      }
+      projections.set(key, { ...field, alias });
+    }
+    const selectedFields = [...projections.values()];
     try {
       const assets = await client.getFlexibleAssets({ organizationId: organization.itglueId, assetTypeId, selectedFields });
       for (const definition of typeDefinitions) {
-        const resolution = resolveVariable({ key: definition.key, cardinality: definition.cardinality, selectedFields: definition.selectedFields, validationRules: definition.validationRules }, assets);
+        const definitionAssets = assets.map((asset) => ({ ...asset, fields: Object.fromEntries(definition.selectedFields.map((field) => [field.alias, asset.fields[projections.get(signature(field))!.alias]])) }));
+        const resolution = resolveVariable({ key: definition.key, cardinality: definition.cardinality, selectedFields: definition.selectedFields, validationRules: definition.validationRules }, definitionAssets);
         const now = new Date();
         const saved = await db.transaction(async (tx) => {
           const [current] = await tx.select().from(variableDefinitions).where(eq(variableDefinitions.id, definition.id)).for("update");

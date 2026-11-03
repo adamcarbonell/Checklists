@@ -78,6 +78,7 @@ export type SelectedField = {
   sourceKey: string;
   alias: string;
   expectedKind: string;
+  transform?: "first-active-configuration-name";
 };
 export type ValidationRules = {
   exactRecords?: number;

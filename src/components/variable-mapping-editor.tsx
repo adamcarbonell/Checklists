@@ -2,6 +2,7 @@
 
 import { Plus, Save, ShieldCheck } from "lucide-react";
 import { useState } from "react";
+import type { SelectedField } from "@/db/schema";
 
 type Definition = {
   id: string;
@@ -10,7 +11,7 @@ type Definition = {
   assetTypeId: string;
   assetTypeName: string;
   cardinality: "scalar" | "list";
-  selectedFields: { sourceKey: string; alias: string; expectedKind: string }[];
+  selectedFields: SelectedField[];
   validationRules: {
     exactRecords?: number;
     minItems?: number;
@@ -51,6 +52,26 @@ export function VariableMappingEditor({ initial }: { initial: Definition[] }) {
       setAddingEmail(false);
     }
   };
+  const addDirectoryType = () => {
+    const draft: Definition = {
+      id: "draft-directory-type", key: "org.directory_type", label: "Directory Type",
+      assetTypeId: "107504", assetTypeName: "Active Directory", cardinality: "scalar",
+      selectedFields: [{ sourceKey: "directory-type", alias: "value", expectedKind: "Select" }],
+      validationRules: { exactRecords: 1, requiredFields: ["value"] }, schemaValid: false,
+    };
+    setDefinitions((rows) => [...rows, draft]);
+    setDirty((current) => ({ ...current, [draft.id]: true }));
+  };
+  const addDomainController = () => {
+    const draft: Definition = {
+      id: "draft-primary-domain-controller", key: "org.primary_domain_controller", label: "Primary Domain Controller",
+      assetTypeId: "107504", assetTypeName: "Active Directory", cardinality: "scalar",
+      selectedFields: [{ sourceKey: "primary-domain-controller", alias: "value", expectedKind: "Tag", transform: "first-active-configuration-name" }],
+      validationRules: { exactRecords: 1, requiredFields: ["value"] }, schemaValid: false,
+    };
+    setDefinitions((rows) => [...rows, draft]);
+    setDirty((current) => ({ ...current, [draft.id]: true }));
+  };
   const update = (id: string, value: Partial<Definition>) => {
     setDefinitions((rows) =>
       rows.map((row) => (row.id === id ? { ...row, ...value } : row)),
@@ -62,8 +83,9 @@ export function VariableMappingEditor({ initial }: { initial: Definition[] }) {
     setBusy((current) => ({ ...current, [definition.id]: true }));
     setStatus((current) => ({ ...current, [definition.id]: "Saving…" }));
     try {
-      const response = await fetch(`/api/variables?id=${definition.id}`, {
-        method: "PATCH",
+      const creating = definition.id.startsWith("draft-");
+      const response = await fetch(creating ? "/api/variables" : `/api/variables?id=${definition.id}`, {
+        method: creating ? "POST" : "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           key: definition.key,
@@ -80,14 +102,15 @@ export function VariableMappingEditor({ initial }: { initial: Definition[] }) {
       setDefinitions((rows) =>
         rows.map((row) =>
           row.id === definition.id
-            ? { ...row, schemaValid: result.data.schemaValid }
+            ? { ...row, id: creating ? result.data.id : row.id, schemaValid: result.data.schemaValid }
             : row,
         ),
       );
-      setDirty((current) => ({ ...current, [definition.id]: false }));
+      const savedId = creating ? result.data.id : definition.id;
+      setDirty((current) => ({ ...current, [savedId]: false }));
       setStatus((current) => ({
         ...current,
-        [definition.id]: "Saved. Validate schema, then sync the organization to refresh approved values.",
+        [savedId]: "Saved. Validate schema, then sync the organization to refresh approved values.",
       }));
     } catch {
       setStatus((current) => ({
@@ -142,6 +165,12 @@ export function VariableMappingEditor({ initial }: { initial: Definition[] }) {
         </section>
       )}
       {emailStatus && <p role="status" className="rounded-xl border bg-teal-50 p-3 text-sm text-teal-950">{emailStatus}</p>}
+      {!definitions.some((row) => row.key === "org.directory_type") && (
+        <button type="button" onClick={addDirectoryType} className="inline-flex items-center gap-2 rounded-xl border bg-white px-4 py-2 text-sm"><Plus size={14} /> Add Directory Type</button>
+      )}
+      {!definitions.some((row) => row.key === "org.primary_domain_controller") && (
+        <button type="button" onClick={addDomainController} className="inline-flex items-center gap-2 rounded-xl border bg-white px-4 py-2 text-sm"><Plus size={14} /> Add Primary Domain Controller</button>
+      )}
       {definitions.map((definition) => (
         <section key={definition.id} className="rounded-2xl border border-[#d9e2dc] bg-white p-5 shadow-sm">
           <fieldset disabled={busy[definition.id]}>
@@ -173,6 +202,13 @@ export function VariableMappingEditor({ initial }: { initial: Definition[] }) {
                       <Field label={`Token alias ${label}`}><input value={field.alias} onChange={(event) => changeField({ alias: event.target.value })} className="mapping-input font-mono" pattern="[a-z][a-z0-9_]*" /></Field>
                       <Field label={`Expected kind ${label}`}><input value={field.expectedKind} onChange={(event) => changeField({ expectedKind: event.target.value })} className="mapping-input" /></Field>
                     </div>
+                    <Field label={`Output ${label}`}>
+                      <select value={field.transform ?? ""} onChange={(event) => changeField({ transform: event.target.value ? "first-active-configuration-name" : undefined })} className="mapping-input">
+                        <option value="">Original field value</option>
+                        <option value="first-active-configuration-name">First non-archived configuration name</option>
+                      </select>
+                    </Field>
+                    {field.transform && <p className="mt-2 text-xs text-slate-600">Uses the first non-archived configuration in selection order. Returns its name only. Empty selections are missing values. Configuration lookups run during organization sync.</p>}
                     <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
                       <code className="break-all text-xs text-teal-800">{`{{${definition.cardinality === "list" || definition.selectedFields.length > 1 ? `${definition.key}.${field.alias || "field"}` : definition.key}}}`}</code>
                       <button type="button" disabled={definition.selectedFields.length === 1} onClick={() => update(definition.id, { selectedFields: definition.selectedFields.filter((_, position) => position !== index) })} className="rounded-lg border px-3 py-1 text-xs disabled:opacity-40" aria-label={`Remove approved field ${label}`}>Remove field</button>

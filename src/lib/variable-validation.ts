@@ -21,7 +21,7 @@ export function resolveVariable(definition: VariableDefinitionInput, assets: Pro
   for (const asset of assets) {
     for (const field of definition.selectedFields) {
       const value = asset.fields[field.alias];
-      if (value != null && !matchesExpectedKind(value, field.expectedKind)) issues.push(`record_${asset.id}_schema_mismatch_${field.alias}`);
+      if (value != null && !matchesExpectedKind(value, field.transform === "first-active-configuration-name" ? "Text" : field.expectedKind)) issues.push(`record_${asset.id}_schema_mismatch_${field.alias}`);
     }
     for (const field of required) {
       const value = asset.fields[field];

@@ -49,6 +49,44 @@ describe("explicit approval of additional variable fields", () => {
     expect(screen.queryByText(/private-error-payload/)).toBeNull();
     expect((screen.getByRole("button", { name: "Add Email variable" }) as HTMLButtonElement).disabled).toBe(false);
   });
+  it("creates the verified Directory Type mapping as a separate scalar variable", async () => {
+    const fetcher = vi.fn(async (url: string, options: RequestInit) => {
+      expect(options.method).toBe("POST");
+      return Response.json({ data: url.endsWith("/validate") ? { schemaValid: true, issues: [] } : { id: "directory-type", schemaValid: false } });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    render(<VariableMappingEditor initial={[]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Directory Type" }));
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Add Directory Type" })).toBeNull();
+    expect(screen.getByText("{{org.directory_type}}")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Validate schema" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Save mapping" }));
+    await screen.findByText(/Saved\. Validate schema/);
+    expect(fetcher).toHaveBeenCalledWith("/api/variables", expect.objectContaining({ method: "POST" }));
+    expect(JSON.parse(fetcher.mock.calls[0][1].body as string)).toMatchObject({ key: "org.directory_type", assetTypeId: "107504", cardinality: "scalar", selectedFields: [{ sourceKey: "directory-type", alias: "value", expectedKind: "Select" }], validationRules: { exactRecords: 1, requiredFields: ["value"] } });
+    fireEvent.click(screen.getByRole("button", { name: "Validate schema" }));
+    await screen.findByText(/Schema validated\. Sync the organization/);
+    expect(fetcher).toHaveBeenLastCalledWith("/api/variables/directory-type/validate", { method: "POST" });
+  });
+  it("stages and creates a separate scalar controller variable before validation", async () => {
+    const fetcher = vi.fn(async (url: string, options: RequestInit) => {
+      expect(options.method).toBe("POST");
+      return Response.json({ data: url.endsWith("/validate") ? { schemaValid: true, issues: [] } : { id: "controller", schemaValid: false } });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    render(<VariableMappingEditor initial={[]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Primary Domain Controller" }));
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(screen.getByText("{{org.primary_domain_controller}}")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Validate schema" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Save mapping" }));
+    await screen.findByText(/Saved\. Validate schema/);
+    expect(fetcher).toHaveBeenCalledWith("/api/variables", expect.objectContaining({ method: "POST" }));
+    expect(JSON.parse(fetcher.mock.calls[0][1].body as string)).toMatchObject({ key: "org.primary_domain_controller", cardinality: "scalar", selectedFields: [{ sourceKey: "primary-domain-controller", expectedKind: "Tag", transform: "first-active-configuration-name" }], validationRules: { exactRecords: 1, requiredFields: ["value"] } });
+    fireEvent.click(screen.getByRole("button", { name: "Validate schema" }));
+    await waitFor(() => expect(fetcher).toHaveBeenLastCalledWith("/api/variables/controller/validate", { method: "POST" }));
+  });
   it("stages multiple fields without requesting data, saves exact aliases, and requires review then sync", async () => {
     const fetcher = vi.fn(async (url: string, options: RequestInit) => {
       expect(options.method).toBe(url.endsWith("/validate") ? "POST" : "PATCH");

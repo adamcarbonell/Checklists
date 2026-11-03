@@ -7,7 +7,8 @@ import { recordAudit } from "@/lib/audit";
 import { errorResponse, readJson } from "@/lib/input";
 import { hasMappingChanges } from "@/lib/variable-mapping";
 
-const selectedFieldSchema = z.object({ sourceKey: z.string().trim().min(1).max(200), alias: z.string().trim().regex(/^[a-z][a-z0-9_]*$/), expectedKind: z.string().trim().min(1).max(50) });
+const selectedFieldSchema = z.object({ sourceKey: z.string().trim().min(1).max(200), alias: z.string().trim().regex(/^[a-z][a-z0-9_]*$/), expectedKind: z.string().trim().min(1).max(50), transform: z.literal("first-active-configuration-name").optional() })
+  .refine((field) => !field.transform || (field.expectedKind.toLowerCase() === "tag" && field.sourceKey !== "name"));
 const definitionSchema = z.object({
   key: z.string().trim().regex(/^org\.[a-z][a-z0-9_]*$/), label: z.string().trim().min(1).max(160), description: z.string().trim().max(1000).optional(),
   assetTypeId: z.string().regex(/^\d+$/), assetTypeName: z.string().trim().min(1).max(200), cardinality: z.enum(["scalar", "list"]),

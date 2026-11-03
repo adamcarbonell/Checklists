@@ -802,6 +802,26 @@ describe("approved repeated fields", () => {
     expect(created.status).toBe(201);
     expect((await created.json()).data.schemaValid).toBe(false);
   });
+  it("creates and validates a controller name mapping and syncs it independently of AD Full Name", async () => {
+    vi.stubEnv("ITGLUE_API_KEY", "test-only");
+    const response = await mappingPost(request({ key: "org.primary_domain_controller", label: "Primary Domain Controller", assetTypeId: "107504", assetTypeName: "Active Directory", cardinality: "scalar", selectedFields: [{ sourceKey: "primary-domain-controller", alias: "value", expectedKind: "Tag", transform: "first-active-configuration-name" }], validationRules: { exactRecords: 1, requiredFields: ["value"] } }));
+    expect(response.status).toBe(201);
+    const controller = (await response.json()).data;
+    const schemaReader = vi.spyOn(ItGlueClient.prototype, "getFlexibleAssetType").mockResolvedValue({ id: "107504", name: "Active Directory", fields: [{ key: "primary-domain-controller", name: "Primary Domain Controller", kind: "Tag", tagType: "Contacts" }] });
+    const valueReader = vi.spyOn(ItGlueClient.prototype, "getFlexibleAssets").mockImplementation(async (input) => [{ id: "record", name: "Record", fields: Object.fromEntries(input.selectedFields.map((field) => [field.alias, field.sourceKey === "primary-domain-controller" ? "DC-PRIMARY" : field.sourceKey === "ad-full-name" ? "example.test" : "Application"])) }]);
+    try {
+      const invalid = await validateMapping(new Request("http://localhost/validate", { method: "POST" }), context(controller.id));
+      expect((await invalid.json()).data.issues).toContain("configuration_tag_required:primary-domain-controller");
+      schemaReader.mockResolvedValue({ id: "107504", name: "Active Directory", fields: [{ key: "primary-domain-controller", name: "Primary Domain Controller", kind: "Tag", tagType: "Configurations" }] });
+      const valid = await validateMapping(new Request("http://localhost/validate", { method: "POST" }), context(controller.id));
+      expect((await valid.json()).data.schemaValid).toBe(true);
+      expect((await syncOrganization(orgA, "manual", state.actor)).status).toBe("valid");
+      const stored = await state.db.select().from(schema.organizationVariableValues).where(eq(schema.organizationVariableValues.organizationId, orgA));
+      expect(stored.find((row) => row.definitionId === controller.id)?.value).toBe("DC-PRIMARY");
+      const [adDefinition] = await state.db.select().from(schema.variableDefinitions).where(eq(schema.variableDefinitions.key, "org.ad_full_name"));
+      expect(stored.find((row) => row.definitionId === adDefinition.id)?.value).toBe("example.test");
+    } finally { schemaReader.mockRestore(); valueReader.mockRestore(); vi.unstubAllEnvs(); }
+  });
   it("does not let an in-flight sync reapprove values after the mapping changes", async () => {
     vi.stubEnv("ITGLUE_API_KEY", "test-only");
     const reader = vi.spyOn(ItGlueClient.prototype, "getFlexibleAssets").mockImplementation(async (input) => {

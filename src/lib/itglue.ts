@@ -6,7 +6,7 @@ const MAX_RECORDS = 1000;
 
 export type RequestPreview = {
   method: "GET";
-  endpoint: "/flexible_assets" | "/flexible_asset_types" | "/organizations";
+  endpoint: "/flexible_assets" | "/flexible_asset_types" | "/organizations" | "/configurations";
   filters: Record<string, string>;
   includes?: string[];
   projectedFields: string[];
@@ -59,10 +59,42 @@ export class ItGlueClient {
     if (!Array.isArray(payload.data)) throw new ItGlueMalformedError("flexible_assets_data_not_array");
     const resources = payload.data;
     const totalCount = Number(payload.meta?.["total-count"] ?? resources.length);
-    if (totalCount > MAX_RECORDS || payload.links?.next) throw new ItGlueLimitError(totalCount);
-    return resources
-      .filter(isActiveAsset)
-      .map((resource) => projectAsset(resource, input.selectedFields));
+    if (resources.length > MAX_RECORDS || totalCount > MAX_RECORDS || payload.links?.next) throw new ItGlueLimitError(Math.max(totalCount, resources.length));
+    const configurations = new Map<string, string | null>();
+    const projected: ProjectedAsset[] = [];
+    for (const resource of resources.filter(isActiveAsset)) {
+      const asset = projectAsset(resource, input.selectedFields);
+      for (const field of input.selectedFields) {
+        if (field.transform !== "first-active-configuration-name") continue;
+        const traits = resource.attributes?.traits;
+        const raw = isObject(traits) ? traits[flexibleAssetTraitKey(field.sourceKey)] : null;
+        let name: string | null = null;
+        for (const id of configurationSelectionIds(raw)) {
+          if (!configurations.has(id)) {
+            if (configurations.size >= MAX_RECORDS) throw new ItGlueLimitError(configurations.size + 1);
+            configurations.set(id, await this.getActiveConfigurationName(id, input.organizationId));
+          }
+          name = configurations.get(id) ?? null;
+          if (name !== null) break;
+        }
+        asset.fields[field.alias] = name;
+      }
+      projected.push(asset);
+    }
+    return projected;
+  }
+
+  private async getActiveConfigurationName(id: string, organizationId: string): Promise<string | null> {
+    await this.onRequestPreview({ method: "GET", endpoint: "/configurations", filters: { id, "organization-id": organizationId }, projectedFields: ["name", "archived", "organization-id"], resultLimit: 1, dataSensitivity: "organization-documentation", possibleSideEffects: "none-read-only" });
+    const url = new URL(`${this.baseUrl}/organizations/${encodeURIComponent(organizationId)}/relationships/configurations/${encodeURIComponent(id)}`);
+    let payload: JsonApiResponse;
+    try { payload = await this.request(url); }
+    catch (error) { if (error instanceof ItGlueHttpError && error.status === 404) return null; throw error; }
+    const resource = !Array.isArray(payload.data) ? payload.data : undefined;
+    const attributes = resource?.attributes;
+    if (!resource || String(resource.id) !== id || String(attributes?.["organization-id"]) !== organizationId || typeof attributes?.archived !== "boolean") throw new ItGlueMalformedError("configuration_missing_or_mismatched");
+    if (attributes.archived) return null;
+    return typeof attributes.name === "string" && attributes.name.trim() ? attributes.name : null;
   }
 
   async lookupOrganization(input: { id?: string; exactName?: string }) {
@@ -98,7 +130,7 @@ export class ItGlueClient {
   }
 
   async getFlexibleAssetType(id: string) {
-    await this.onRequestPreview({ method: "GET", endpoint: "/flexible_asset_types", filters: { id }, includes: ["flexible_asset_fields"], projectedFields: ["id", "name", "fields.name", "fields.name-key", "fields.kind"], resultLimit: MAX_RECORDS, dataSensitivity: "tenant-schema", possibleSideEffects: "none-read-only" });
+    await this.onRequestPreview({ method: "GET", endpoint: "/flexible_asset_types", filters: { id }, includes: ["flexible_asset_fields"], projectedFields: ["id", "name", "fields.name", "fields.name-key", "fields.kind", "fields.tag-type"], resultLimit: MAX_RECORDS, dataSensitivity: "tenant-schema", possibleSideEffects: "none-read-only" });
     const url = new URL(`${this.baseUrl}/flexible_asset_types/${encodeURIComponent(id)}`);
     url.searchParams.set("include", "flexible_asset_fields");
     const payload = await this.request(url);
@@ -116,7 +148,7 @@ export class ItGlueClient {
       const key = attributes?.["name-key"];
       const kind = attributes?.kind;
       if (typeof key !== "string" || !key || typeof kind !== "string" || !kind) throw new ItGlueMalformedError("flexible_asset_field_missing_key_or_kind");
-      return { key, name: typeof attributes.name === "string" ? attributes.name : key, kind };
+      return { key, name: typeof attributes.name === "string" ? attributes.name : key, kind, ...(typeof attributes["tag-type"] === "string" ? { tagType: attributes["tag-type"] } : {}) };
     });
     return { id: String(resource.id), name: String(resource.attributes?.name ?? ""), fields };
   }
@@ -172,6 +204,17 @@ function projectAsset(resource: JsonApiResource, fields: SelectedField[]): Proje
 // name to be approved independently without silently changing existing values.
 export function flexibleAssetTraitKey(sourceKey: string) {
   return sourceKey.startsWith("traits.") ? sourceKey.slice(7) : sourceKey;
+}
+
+function configurationSelectionIds(raw: unknown): string[] {
+  if (raw == null) return [];
+  const values = isObject(raw) && Array.isArray(raw.values) ? raw.values : Array.isArray(raw) ? raw : [raw];
+  if (values.length > MAX_RECORDS) throw new ItGlueLimitError(values.length);
+  return values.map((entry) => {
+    const id = isObject(entry) ? entry.id : entry;
+    if ((typeof id !== "string" && typeof id !== "number") || !/^\d+$/.test(String(id))) throw new ItGlueMalformedError("configuration_selection_invalid");
+    return String(id);
+  });
 }
 
 function normalizeTrait(value: unknown): unknown {
