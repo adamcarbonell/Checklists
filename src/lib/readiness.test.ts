@@ -40,6 +40,9 @@ describe("schema-aware readiness", () => {
       await client.exec(await readFile("drizzle/0002_conditional_groups.sql", "utf8"));
       expect((await GET()).status).toBe(503);
       await client.exec(await readFile("drizzle/0003_organization_checklist_folders.sql", "utf8"));
+      await client.exec(await readFile("drizzle/0004_plural_default_checklist_folders.sql", "utf8"));
+      expect((await GET()).status).toBe(503);
+      await client.exec(await readFile("drizzle/0005_organization_logos.sql", "utf8"));
       const current = await GET();
       expect(current.status).toBe(200);
       expect(await current.json()).toEqual({ status: "ready" });

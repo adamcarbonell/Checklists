@@ -17,6 +17,7 @@ import {
   api,
 } from "./workspace-ui";
 import { RichInstructions } from "./rich-instructions";
+import { ChecklistDeleteDialog } from "./checklist-delete-dialog";
 import { checklistPath, organizationPath } from "@/lib/organization-paths";
 type Draft = { value: string; expectedVersion: number };
 export function ChecklistRun({
@@ -32,6 +33,7 @@ export function ChecklistRun({
     [data, setData] = useState(initial),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
+    [confirmDelete, setConfirmDelete] = useState(false),
     [drafts, setDrafts] = useState<Record<string, Draft>>({}),
     [skipId, setSkipId] = useState<string | null>(null),
     [activity, setActivity] = useState<{
@@ -187,23 +189,17 @@ export function ChecklistRun({
                     : "Delete checklist",
                   danger: !data.deletedAt,
                   disabled: busy,
-                  onClick: () =>
-                    action(async (current) => {
-                      if (
-                        !window.confirm(
-                          data.deletedAt
-                            ? "Restore this frozen checklist?"
-                            : "Soft-delete this checklist? An administrator can restore it.",
-                        )
-                      )
-                        return;
-                      await api(
-                        `/api/checklists/${data.id}${data.deletedAt ? "/restore" : ""}`,
-                        data.deletedAt ? "POST" : "DELETE",
-                      );
-                      if (data.deletedAt) await fetchLatest();
-                      else router.push(organizationPath(current.organizationId, current.folderId));
-                    }, true),
+                  onClick: () => {
+                    if (!data.deletedAt) {
+                      setError("");
+                      setConfirmDelete(true);
+                    } else if (window.confirm("Restore this frozen checklist?")) {
+                      return action(async (current) => {
+                        await api(`/api/checklists/${current.id}/restore`, "POST");
+                        await fetchLatest();
+                      }, true);
+                    }
+                  },
                 },
               ]}
             />
@@ -441,6 +437,19 @@ export function ChecklistRun({
               setSkipId(null);
             });
           }}
+        />
+      )}
+      {confirmDelete && (
+        <ChecklistDeleteDialog
+          count={1}
+          busy={busy}
+          error={error}
+          onClose={() => { if (!busy) setConfirmDelete(false); }}
+          onConfirm={() => void action(async (current) => {
+            await api(`/api/checklists/${current.id}`, "DELETE");
+            setConfirmDelete(false);
+            router.push(organizationPath(current.organizationId, current.folderId));
+          }, true)}
         />
       )}
       {move && (

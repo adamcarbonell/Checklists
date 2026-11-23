@@ -288,13 +288,10 @@ export function OrganizationDirectory({
             .map((org) => (
               <a
                 key={org.id}
-                className="rounded-2xl border bg-white p-5"
+                className="focus-ring rounded-2xl border bg-white p-5 hover:border-teal-500 hover:bg-teal-50"
                 href={`/organizations/${org.id}`}
               >
                 <h2 className="font-semibold">{org.name}</h2>
-                <p className="mt-2 text-sm text-teal-700">
-                  Open organization →
-                </p>
               </a>
             ))}
         </div>

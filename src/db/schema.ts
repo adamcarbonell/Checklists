@@ -1,6 +1,7 @@
 import {
   boolean,
   check,
+  customType,
   foreignKey,
   index,
   integer,
@@ -72,6 +73,23 @@ export const organizations = pgTable(
   (table) => [
     uniqueIndex("organizations_itglue_id_uidx").on(table.itglueId),
     index("organizations_enabled_idx").on(table.enabled, table.deletedAt),
+  ],
+);
+
+const bytea = customType<{ data: Uint8Array }>({ dataType: () => "bytea" });
+
+export const organizationLogos = pgTable(
+  "organization_logos",
+  {
+    organizationId: uuid("organization_id").primaryKey()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    mimeType: text("mime_type").notNull(),
+    image: bytea("image").notNull(),
+    version: uuid("version").notNull().defaultRandom(),
+  },
+  (table) => [
+    check("organization_logo_mime_check", sql`${table.mimeType} in ('image/png', 'image/jpeg', 'image/webp', 'image/gif')`),
+    check("organization_logo_size_check", sql`octet_length(${table.image}) between 1 and 1048576`),
   ],
 );
 

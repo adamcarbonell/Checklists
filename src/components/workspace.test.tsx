@@ -4,6 +4,7 @@ import {
   render,
   screen,
   fireEvent,
+  within,
   waitFor,
   cleanup,
 } from "@testing-library/react";
@@ -674,17 +675,50 @@ describe("new template authoring", () => {
       />,
     );
     expect(
-      screen.getByRole("link", { name: /Client One Open organization/ }).getAttribute("href"),
+      screen.getByRole("link", { name: "Client One" }).getAttribute("href"),
     ).toBe("/organizations/org-1");
     expect(
       screen.queryByRole("link", { name: "Manage IT Glue organizations" }),
     ).toBeNull();
-    expect(screen.queryByText(/Open organization templates/)).toBeNull();
+    expect(screen.queryByText(/Open organization/)).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
+  });
+});
+describe("organization logo on the workspace", () => {
+  const boardProps = {
+    initial: { data: [], total: 0, page: 1, pageSize: 50 },
+    organization: fixture.organizations[0],
+    folders: [],
+    templates: [],
+  };
+  it("shows the saved logo beside the organization name on its workspace only", () => {
+    const { rerender } = render(<ChecklistBoard {...boardProps} logoVersion="saved-version" user={viewer} />);
+    expect((screen.getByAltText("") as HTMLImageElement).src)
+      .toBe(new URL("/api/organizations/org-1/logo?v=saved-version", window.location.href).href);
+    expect(screen.queryByRole("button", { name: "Change logo" })).toBeNull();
+    rerender(<ChecklistBoard {...boardProps} folder={{ id: "folder-1", name: "User Onboardings" }} logoVersion="saved-version" user={viewer} />);
+    expect(screen.queryByAltText("")).toBeNull();
+  });
+  it("lets an administrator upload an image and displays it after saving", async () => {
+    const fetcher = vi.fn(async (_url: string, options?: RequestInit) =>
+      options?.method === "PUT" ? Response.json({ version: "new-version" }) : Response.json(boardProps.initial));
+    vi.stubGlobal("fetch", fetcher);
+    render(<ChecklistBoard {...boardProps} user={{ ...user, role: "admin" }} />);
+    expect(screen.queryByAltText("")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add logo" }));
+    const file = new File(["png"], "logo.png", { type: "image/png" });
+    fireEvent.change(screen.getByLabelText("Logo image"), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "Save logo" }));
+    expect((await screen.findByAltText("") as HTMLImageElement).src)
+      .toBe(new URL("/api/organizations/org-1/logo?v=new-version", window.location.href).href);
+    expect(fetcher).toHaveBeenCalledWith("/api/organizations/org-1/logo", {
+      method: "PUT", headers: { "Content-Type": "image/png" }, body: file,
+    });
   });
 });
 describe("shared runnable checklist controls", () => {
   it("lets viewers create frozen checklists using an idempotency key", async () => {
-    const folder = { id: "employee", name: "New Employee" };
+    const folder = { id: "employee", name: "User Onboardings" };
     render(
       <ChecklistBoard
         initial={{ data: [], total: 0, page: 1, pageSize: 50 }}
@@ -715,7 +749,7 @@ describe("shared runnable checklist controls", () => {
     });
   });
   it("uses the open folder and only offers active templates from this organization", async () => {
-    const folder = { id: "computer", name: "New Computer" };
+    const folder = { id: "computer", name: "Computer Onboardings" };
     render(<ChecklistBoard initial={{ data: [], total: 0, page: 1, pageSize: 50 }} organization={fixture.organizations[0]} folders={[folder]} folder={folder} templates={[child, { ...child, id: "other", organizationId: "org-2" }, { ...child, id: "archived", deletedAt: "2026-11-22" }]} user={user} />);
     fireEvent.click(screen.getByRole("button", { name: "New checklist" }));
     expect(screen.queryByRole("combobox", { name: "Checklist folder" })).toBeNull();
@@ -739,6 +773,81 @@ describe("shared runnable checklist controls", () => {
     expect(
       screen.queryByRole("button", { name: "Checklist actions" }),
     ).toBeNull();
+  });
+  it("confirms checklist deletion in a webpage dialog", async () => {
+    render(<ChecklistRun initial={run} user={{ ...user, role: "admin" }} />);
+    function openDelete() {
+      fireEvent.click(screen.getByRole("button", { name: "Checklist actions" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: "Delete checklist" }));
+      return within(screen.getByRole("dialog", { name: "Are you sure you want to delete this checklist?" }));
+    }
+    fireEvent.click(openDelete().getByRole("button", { name: "Cancel" }));
+    expect(requests.some((request) => request.method === "DELETE")).toBe(false);
+    fireEvent.click(openDelete().getByRole("button", { name: "Delete checklist" }));
+    await waitFor(() => expect(requests).toContainEqual({
+      url: `/api/checklists/${run.id}`, method: "DELETE", body: null,
+    }));
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+  const employees = { id: "employee", name: "User Onboardings" };
+  const computers = { id: "computer", name: "Computer Onboardings" };
+  function checklistBoard(role: "admin" | "editor" | "viewer") {
+    render(<ChecklistBoard
+      initial={{ data: [
+        { ...run, id: "first", name: "First checklist", folderId: employees.id },
+        { ...run, id: "second", name: "Second checklist", folderId: employees.id },
+        { ...run, id: "deleted", name: "Deleted checklist", folderId: employees.id, deletedAt: "2026-11-22" },
+      ], total: 3, page: 1, pageSize: 50 }}
+      organization={fixture.organizations[0]}
+      folders={[employees, computers]}
+      folder={employees}
+      templates={[child]}
+      user={{ ...user, role }}
+    />);
+  }
+  it("moves a page selection and leaves deleted rows out of the batch", async () => {
+    checklistBoard("editor");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all on this page" }));
+    expect(screen.getByText("2 selected")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Delete selected" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Move selected" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Move 2 checklists" }));
+    fireEvent.change(dialog.getByRole("combobox", { name: "Destination folder" }), { target: { value: computers.id } });
+    fireEvent.click(dialog.getByRole("button", { name: "Move checklists" }));
+    expect((await screen.findByRole("status")).textContent).toBe("Moved 2 checklists to Computer Onboardings.");
+    expect(requests.find((entry) => entry.url.endsWith("/bulk"))?.body).toEqual({
+      action: "move", checklistIds: ["first", "second"], expectedFolderId: employees.id, folderId: computers.id,
+    });
+  });
+  it("confirms a bulk deletion of selected checklists", async () => {
+    checklistBoard("admin");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all on this page" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete selected" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Are you sure you want to delete these 2 checklists?" }));
+    fireEvent.click(dialog.getByRole("button", { name: "Delete checklists" }));
+    await waitFor(() => expect(requests.find((entry) => entry.url.endsWith("/bulk"))?.body).toEqual({
+      action: "delete", checklistIds: ["first", "second"], expectedFolderId: employees.id,
+    }));
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+  it("moves the dragged checklist upon dropping it on another folder", async () => {
+    checklistBoard("editor");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Second checklist" }));
+    const grip = within(screen.getByRole("heading", { name: "First checklist" }).closest("article")!).getByTitle("Drag to a folder");
+    const dataTransfer = { setData: vi.fn(), effectAllowed: "", dropEffect: "" };
+    fireEvent.dragStart(grip, { dataTransfer });
+    const target = screen.getByRole("link", { name: computers.name });
+    fireEvent.dragOver(target, { dataTransfer });
+    expect(dataTransfer.dropEffect).toBe("move");
+    fireEvent.drop(target, { dataTransfer });
+    await waitFor(() => expect(requests.find((entry) => entry.url.endsWith("/bulk"))?.body).toEqual({
+      action: "move", checklistIds: ["first"], expectedFolderId: employees.id, folderId: computers.id,
+    }));
+  });
+  it("hides selection and drag handles from viewers", () => {
+    checklistBoard("viewer");
+    expect(screen.queryByRole("checkbox", { name: "Select all on this page" })).toBeNull();
+    expect(screen.queryByTitle("Drag to a folder")).toBeNull();
   });
   it("requires a skip reason and persists optional notes", async () => {
     render(<ChecklistRun initial={run} user={viewer} />);

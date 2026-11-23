@@ -29,6 +29,20 @@
       "when": 1795410461259,
       "tag": "0003_organization_checklist_folders",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795410461260,
+      "tag": "0004_plural_default_checklist_folders",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795413361818,
+      "tag": "0005_organization_logos",
+      "breakpoints": true
     }
   ]
 }

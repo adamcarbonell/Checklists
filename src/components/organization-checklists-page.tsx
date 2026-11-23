@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
 import { z } from "zod";
-import { hasDatabase } from "@/db/client";
+import { eq } from "drizzle-orm";
+import { getDatabase, hasDatabase } from "@/db/client";
+import { organizationLogos } from "@/db/schema";
 import { signedInPage } from "@/lib/page-access";
 import { loadOrganization, loadTemplates } from "@/lib/workspace-data";
 import { loadChecklistFolders } from "@/lib/checklist-folders";
@@ -16,9 +18,11 @@ export async function OrganizationChecklistsPage({ id, folderId }: { id: string;
   const folders = await loadChecklistFolders(id);
   const folder = folders.find((entry) => entry.id === folderId);
   if (folderId && !folder) notFound();
-  const [initial, templates] = await Promise.all([
+  const [initial, templates, [logo]] = await Promise.all([
     listChecklists({ organizationId: id, folderId }),
     loadTemplates({ scope: "organization", organizationId: id }),
+    folderId ? [] : getDatabase().select({ version: organizationLogos.version }).from(organizationLogos)
+      .where(eq(organizationLogos.organizationId, id)).limit(1),
   ]);
-  return <ChecklistBoard key={folderId ?? id} initial={initial} organization={organization} folders={folders} folder={folder} templates={templates} user={user} />;
+  return <ChecklistBoard key={folderId ?? id} initial={initial} organization={organization} folders={folders} folder={folder} templates={templates} logoVersion={logo?.version} user={user} />;
 }

@@ -76,9 +76,11 @@ import {
   GET as listRunsRoute,
 } from "@/app/api/organizations/[id]/checklists/route";
 import { POST as enableOrgRoute } from "@/app/api/organizations/route";
+import { GET as getLogo, PUT as putLogo, DELETE as deleteLogo } from "@/app/api/organizations/[id]/logo/route";
 import { POST as createFolderRoute } from "@/app/api/organizations/[id]/folders/route";
 import { DELETE as deleteFolderRoute, PATCH as renameFolderRoute } from "@/app/api/organizations/[id]/folders/[folderId]/route";
 import { PATCH as moveRunRoute } from "@/app/api/organizations/[id]/checklists/[checklistId]/folder/route";
+import { POST as bulkRunRoute } from "@/app/api/organizations/[id]/checklists/bulk/route";
 import { loadChecklistFolders } from "./checklist-folders";
 import { PATCH as progressRoute } from "@/app/api/checklists/[id]/steps/[stepId]/route";
 import { DELETE as deleteRunRoute } from "@/app/api/checklists/[id]/route";
@@ -134,7 +136,7 @@ async function createChecklist(input: { templateId: string; name?: string; creat
   const [template] = await state.db.select({ organizationId: schema.templates.organizationId })
     .from(schema.templates).where(eq(schema.templates.id, input.templateId));
   const organizationId = template?.organizationId ?? orgA;
-  const folder = (await loadChecklistFolders(organizationId)).find((entry) => entry.name === "New Employee")!;
+  const folder = (await loadChecklistFolders(organizationId)).find((entry) => entry.name === "User Onboardings")!;
   return createFiledChecklist({ ...input, organizationId, folderId: folder.id }, actorId);
 }
 beforeAll(async () => {
@@ -147,6 +149,8 @@ beforeAll(async () => {
   state.db = drizzle(client, { schema }) as unknown as Database;
   await client.exec(await readFile("drizzle/0002_conditional_groups.sql", "utf8"));
   await client.exec(await readFile("drizzle/0003_organization_checklist_folders.sql", "utf8"));
+  await client.exec(await readFile("drizzle/0004_plural_default_checklist_folders.sql", "utf8"));
+  await client.exec(await readFile("drizzle/0005_organization_logos.sql", "utf8"));
 }, 30000);
 afterAll(async () => client.close());
 beforeEach(async () => {
@@ -184,7 +188,7 @@ beforeEach(async () => {
   orgA = orgs[0].id;
   orgB = orgs[1].id;
   [folderA, folderB] = await Promise.all([orgA, orgB].map(async (id) =>
-    (await loadChecklistFolders(id)).find((entry) => entry.name === "New Employee")!.id,
+    (await loadChecklistFolders(id)).find((entry) => entry.name === "User Onboardings")!.id,
   ));
   const defs = await state.db
     .insert(schema.variableDefinitions)
@@ -1434,7 +1438,7 @@ describe("organization checklist folders", () => {
     expect(created.status).toBe(201);
     const organizationId = (await created.json()).data.id;
     const folders = await loadChecklistFolders(organizationId);
-    expect(folders.map((entry) => entry.name)).toEqual(["Computer Offboarding", "New Computer", "New Employee", "User Offboarding"]);
+    expect(folders.map((entry) => entry.name)).toEqual(["Computer Offboardings", "Computer Onboardings", "User Offboardings", "User Onboardings"]);
     const first = folders[0];
     const folderContext = { params: Promise.resolve({ id: organizationId, folderId: first.id }) };
     expect((await renameFolderRoute(request({ name: "Custom offboarding" }, "PATCH"), folderContext)).status).toBe(200);
@@ -1448,7 +1452,7 @@ describe("organization checklist folders", () => {
     expect((await createRunRoute(request(payload), context(orgA))).status).toBe(404);
     expect((await createRunRoute(request({ ...payload, templateId: childB, folderId: folderA }), context(orgA))).status).toBe(404);
     expect((await listRunsRoute(new Request(`http://localhost/api?folderId=${folderB}`), context(orgA))).status).toBe(404);
-    expect((await createFolderRoute(request({ name: "new employee" }), context(orgA))).status).toBe(409);
+    expect((await createFolderRoute(request({ name: "user onboardings" }), context(orgA))).status).toBe(409);
     const run = await createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor);
     expect(await loadChecklist(run.id, false, orgB)).toBeNull();
     await setChecklistDeleted(run.id, true, state.actor);
@@ -1476,6 +1480,88 @@ describe("organization checklist folders", () => {
     expect((await loadActivity(run.id)).data.some((entry) => entry.event === "moved_to_folder")).toBe(true);
     expect((await createFiledChecklist(input, state.actor)).id).toBe(run.id);
     await expect(createFiledChecklist({ ...input, folderId: destination.id }, state.actor)).rejects.toMatchObject({ status: 409 });
+  });
+  it("validates bulk permissions and scope, then moves and soft-deletes whole selections", async () => {
+    const a = await createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor);
+    const b = await createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor);
+    const foreign = await createChecklist({ templateId: childB, creationKey: randomUUID() }, state.actor);
+    const destination = (await loadChecklistFolders(orgA)).find((folder) => folder.id !== folderA)!;
+    const move = { action: "move", checklistIds: [a.id, b.id], expectedFolderId: folderA, folderId: destination.id };
+    const remove = { action: "delete", checklistIds: [a.id, b.id], expectedFolderId: destination.id };
+    const batch = (payload: unknown) => bulkRunRoute(request(payload), context(orgA));
+    state.role = "viewer";
+    expect((await batch(move)).status).toBe(403);
+    state.role = "editor";
+    expect((await batch(remove)).status).toBe(403);
+    expect((await batch({ ...move, checklistIds: [a.id, a.id.toUpperCase()] })).status).toBe(400);
+    expect((await batch({ ...move, checklistIds: [a.id, foreign.id] })).status).toBe(404);
+    expect((await batch({ ...move, folderId: folderB })).status).toBe(404);
+    expect((await loadChecklist(a.id))?.folderId).toBe(folderA);
+    expect((await batch(move)).status).toBe(204);
+
+    state.role = "admin";
+    const before = await loadChecklist(a.id);
+    expect((await batch({ ...remove, expectedFolderId: folderA })).status).toBe(409);
+    expect((await batch({ ...remove, checklistIds: [a.id, foreign.id] })).status).toBe(404);
+    expect((await loadChecklist(a.id))?.deletedAt).toBeNull();
+    expect((await batch(remove)).status).toBe(204);
+    for (const id of remove.checklistIds) {
+      expect(await loadChecklist(id)).toBeNull();
+      expect(await loadChecklist(id, true)).toMatchObject({ folderId: destination.id, deletedAt: expect.any(String) });
+      expect((await loadActivity(id)).data.map((entry) => entry.event)).toEqual(expect.arrayContaining(["moved_to_folder", "deleted"]));
+    }
+    await setChecklistDeleted(a.id, false, state.actor);
+    expect(await loadChecklist(a.id)).toEqual(before);
+  });
+});
+describe("organization logos", () => {
+  it("serves uploaded image bytes only to signed-in users and enforces admin writes", async () => {
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ipKcAAAAASUVORK5CYII=", "base64");
+    const upload = () => new Request("http://localhost/api", {
+      method: "PUT", headers: { "content-type": "image/png" }, body: Uint8Array.from(png),
+    });
+    const read = (id: string) => getLogo(new Request("http://localhost/api"), context(id));
+    const remove = (id: string) => deleteLogo(new Request("http://localhost/api", { method: "DELETE" }), context(id));
+    const saved = await putLogo(upload(), context(orgA));
+    expect(saved.status).toBe(200);
+    const { version } = await saved.json();
+    const replaced = await putLogo(upload(), context(orgA));
+    expect(replaced.status).toBe(200);
+    const replacement = await replaced.json();
+    expect(replacement.version).not.toBe(version);
+    expect(await state.db.select({ version: schema.organizationLogos.version }).from(schema.organizationLogos))
+      .toEqual([replacement]);
+
+    state.role = "viewer";
+    const logo = await read(orgA);
+    expect(logo.status).toBe(200);
+    expect(logo.headers.get("cache-control")).toBe("private, no-store");
+    expect(logo.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await logo.arrayBuffer())).toEqual(png);
+    expect((await read(orgB)).status).toBe(404);
+    expect((await putLogo(upload(), context(orgA))).status).toBe(403);
+    expect((await remove(orgA)).status).toBe(403);
+    state.enabled = false;
+    expect((await read(orgA)).status).toBe(401);
+    state.enabled = true;
+
+    state.role = "admin";
+    await state.db.update(schema.organizations).set({ enabled: false }).where(eq(schema.organizations.id, orgA));
+    expect((await read(orgA)).status).toBe(404);
+    expect((await putLogo(upload(), context(orgA))).status).toBe(404);
+    await state.db.update(schema.organizations).set({ enabled: true }).where(eq(schema.organizations.id, orgA));
+    expect((await read(orgA)).status).toBe(200);
+    expect((await remove(orgA)).status).toBe(204);
+    expect((await read(orgA)).status).toBe(404);
+  });
+  it("rejects unsupported, mislabeled and oversized images", async () => {
+    const upload = (mime: string, body: BodyInit) => putLogo(new Request("http://localhost/api", {
+      method: "PUT", headers: { "content-type": mime }, body,
+    }), context(orgA));
+    expect((await upload("image/svg+xml", "<svg></svg>")).status).toBe(415);
+    expect((await upload("image/png", "<svg></svg>")).status).toBe(415);
+    expect((await upload("image/png", new Uint8Array(1024 * 1024 + 1))).status).toBe(413);
+    expect(await state.db.select().from(schema.organizationLogos)).toEqual([]);
   });
 });
 describe("role and session boundaries", () => {

@@ -9,7 +9,7 @@ import {
   ilike,
   inArray,
 } from "drizzle-orm";
-import { getDatabase } from "@/db/client";
+import { getDatabase, type DatabaseTransaction } from "@/db/client";
 import {
   checklistActivity,
   checklists,
@@ -319,20 +319,49 @@ export async function moveChecklist(
   input: { folderId: string; expectedFolderId: string | null },
   actorUserId: string,
 ) {
+  return changeChecklists(organizationId, {
+    ...input, action: "move", checklistIds: [id],
+  }, actorUserId);
+}
+
+type ChecklistBatch = {
+  checklistIds: string[];
+  expectedFolderId: string | null;
+} & ({ action: "move"; folderId: string } | { action: "delete" });
+
+export async function changeChecklists(
+  organizationId: string,
+  input: ChecklistBatch,
+  actorUserId: string,
+) {
   return getDatabase().transaction(async (tx) => {
     if (!await loadOrganization(organizationId, tx)) throw new OrderError("organization_not_found", 404);
-    const [row] = await tx.select({ folderId: checklists.folderId }).from(checklists).where(and(
-      eq(checklists.id, id), eq(checklists.organizationId, organizationId), isNull(checklists.deletedAt),
-    )).for("update");
-    if (!row) throw new OrderError("checklist_not_found", 404);
-    if (row.folderId !== input.expectedFolderId) throw new OrderError("checklist_folder_changed", 409);
-    if (row.folderId === input.folderId) return;
+    const rows = await tx.select({ id: checklists.id, folderId: checklists.folderId })
+      .from(checklists).where(and(
+        inArray(checklists.id, input.checklistIds),
+        eq(checklists.organizationId, organizationId),
+        isNull(checklists.deletedAt),
+      )).orderBy(asc(checklists.id)).for("update");
+    if (rows.length !== input.checklistIds.length) throw new OrderError("checklist_not_found", 404);
+    if (rows.some((row) => row.folderId !== input.expectedFolderId)) {
+      throw new OrderError("checklist_folder_changed", 409);
+    }
+    if (input.action === "delete") {
+      for (const row of rows) await changeDeletion(tx, row.id, true, actorUserId);
+      return;
+    }
+    if (input.expectedFolderId === input.folderId) return;
     const destination = await lockChecklistFolder(tx, organizationId, input.folderId);
-    const changes = { fromFolderId: row.folderId, toFolderId: destination.id, toFolderName: destination.name };
-    await tx.update(checklists).set({ folderId: destination.id, updatedAt: new Date() }).where(eq(checklists.id, id));
-    await tx.insert(checklistActivity).values({ checklistId: id, actorUserId, event: "moved_to_folder", changes });
-    await recordAudit({ actorUserId, eventType: "checklist.moved_to_folder", entityType: "checklist", entityId: id,
-      details: { organizationId, ...changes } }, tx);
+    const changes = { fromFolderId: input.expectedFolderId, toFolderId: destination.id, toFolderName: destination.name };
+    await tx.update(checklists).set({ folderId: destination.id, updatedAt: new Date() })
+      .where(inArray(checklists.id, rows.map(({ id }) => id)));
+    await tx.insert(checklistActivity).values(rows.map(({ id }) => ({
+      checklistId: id, actorUserId, event: "moved_to_folder", changes,
+    })));
+    for (const { id } of rows) {
+      await recordAudit({ actorUserId, eventType: "checklist.moved_to_folder", entityType: "checklist",
+        entityId: id, details: { organizationId, ...changes } }, tx);
+    }
   });
 }
 
@@ -541,28 +570,19 @@ export async function setChecklistDeleted(
       .where(eq(checklists.id, id))
       .for("update");
     if (!row) throw new OrderError("checklist_not_found", 404);
-    await tx
-      .update(checklists)
-      .set({ deletedAt: deleted ? new Date() : null, updatedAt: new Date() })
-      .where(eq(checklists.id, id));
-    await tx
-      .insert(checklistActivity)
-      .values({
-        checklistId: id,
-        actorUserId,
-        event: deleted ? "deleted" : "restored",
-        changes: {},
-      });
-    await recordAudit(
-      {
-        actorUserId,
-        eventType: deleted ? "checklist.deleted" : "checklist.restored",
-        entityType: "checklist",
-        entityId: id,
-      },
-      tx,
-    );
+    await changeDeletion(tx, id, deleted, actorUserId);
   });
+}
+
+async function changeDeletion(tx: DatabaseTransaction, id: string, deleted: boolean, actorUserId: string) {
+  const now = new Date();
+  const event = deleted ? "deleted" : "restored";
+  await tx.update(checklists).set({ deletedAt: deleted ? now : null, updatedAt: now })
+    .where(eq(checklists.id, id));
+  await tx.insert(checklistActivity).values({ checklistId: id, actorUserId, event, changes: {} });
+  await recordAudit({
+    actorUserId, eventType: `checklist.${event}`, entityType: "checklist", entityId: id,
+  }, tx);
 }
 function escapeLike(value: string) {
   return value.replace(/[\\%_]/g, "\\$&");

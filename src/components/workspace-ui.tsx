@@ -104,6 +104,7 @@ export async function api(url: string, method = "GET", body?: unknown) {
       folder_not_found: "That folder no longer exists in this organization.",
       folder_name_taken: "This organization already has a folder with that name.",
       folder_not_empty: "This folder still contains checklists. Archived checklists count too.",
+      checklist_not_found: "A selected checklist is no longer available. Refresh and try again.",
       checklist_folder_changed: "The checklist was moved by someone else. Refresh and try again.",
       unauthorized: "Your session expired. Sign in again.",
     };
@@ -461,7 +462,10 @@ export function Modal({
     <dialog
       ref={ref}
       aria-label={title}
-      onCancel={onClose}
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
       className="fixed inset-0 m-auto h-fit max-h-[90dvh] w-[min(92vw,760px)] overflow-y-auto rounded-2xl border border-slate-200 bg-[#fffef9] p-0 shadow-2xl backdrop:bg-[#102d2a]/55"
     >
       <div className="flex items-center justify-between border-b p-5">

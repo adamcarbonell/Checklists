@@ -32,8 +32,7 @@ describe("redesign cutover safety", () => {
       const tables=["templates","revisions","checklists","checklist_steps","checklist_activity","variable_definitions","organizations","users","audit_events"];
       const before=await Promise.all(tables.map(async(table)=>(await client.query(`SELECT * FROM ${table} ORDER BY id`)).rows));
       expect(await applyMigrations(db,migrations.slice(0,3),[])).toBe(1);
-      expect(await applyMigrations(db,migrations,[])).toBe(1);
-      expect(await applyMigrations(db,migrations,[])).toBe(0);
+      expect(await applyMigrations(db,migrations.slice(0,4),[])).toBe(1);
       expect(await Promise.all(tables.map(async (table) => {
         const { rows } = await client.query<Record<string, unknown>>(`SELECT * FROM ${table} ORDER BY id`);
         return table === "checklists" ? rows.map(({ folder_id, ...rest }) => {
@@ -41,10 +40,25 @@ describe("redesign cutover safety", () => {
           return rest;
         }) : rows;
       }))).toEqual(before);
-      const names = ["Computer Offboarding", "New Computer", "New Employee", "User Offboarding"];
-      const folders = await db.select().from(schema.checklistFolders);
+      const originalFolders = await db.select().from(schema.checklistFolders);
+      const filed = originalFolders.find((folder) => folder.name === "New Employee")!;
+      await client.query("UPDATE checklists SET folder_id = $1 WHERE id = $2", [filed.id, run]);
+      const [customOrg] = await db.insert(schema.organizations).values({ itglueId: "3", name: "Custom folders" }).returning();
+      await client.query("UPDATE checklist_folders SET name = 'Own onboarding' WHERE organization_id = $1 AND name = 'User Offboarding'", [customOrg.id]);
+      await db.insert(schema.checklistFolders).values({ organizationId: customOrg.id, name: "computer onboardings" });
+
+      expect(await applyMigrations(db,migrations.slice(0,5),[])).toBe(1);
+      expect(await applyMigrations(db,migrations,[])).toBe(1);
+      expect(await applyMigrations(db,migrations,[])).toBe(0);
+      expect(await db.select().from(schema.organizationLogos)).toEqual([]);
+      const names = ["Computer Offboardings", "Computer Onboardings", "User Offboardings", "User Onboardings"];
+      const allFolders = await db.select().from(schema.checklistFolders);
+      const folders = allFolders.filter((folder) => folder.organizationId === org);
       expect(folders.map((folder) => folder.name).sort()).toEqual(names);
-      expect(folders.every((folder) => folder.organizationId === org)).toBe(true);
+      expect(folders.map((folder) => folder.id).sort()).toEqual(originalFolders.map((folder) => folder.id).sort());
+      expect((await db.select({ folderId: schema.checklists.folderId }).from(schema.checklists))[0].folderId).toBe(filed.id);
+      expect(allFolders.filter((folder) => folder.organizationId === customOrg.id).map((folder) => folder.name).sort())
+        .toEqual(["Computer Offboardings", "New Computer", "Own onboarding", "User Onboardings", "computer onboardings"]);
       const [newOrg] = await db.insert(schema.organizations).values({ itglueId: "2", name: "New organization" }).returning();
       const newFolders = (await db.select().from(schema.checklistFolders)).filter((folder) => folder.organizationId === newOrg.id);
       expect(newFolders.map((folder) => folder.name).sort()).toEqual(names);
@@ -68,7 +82,7 @@ describe("redesign cutover safety", () => {
       ]);
       expect(
         await applyMigrations(db, migrations, ["--confirm-template-reset"]),
-      ).toBe(3);
+      ).toBe(5);
       await db
         .insert(schema.templates)
         .values({ name: "New template", scope: "global" });
@@ -78,7 +92,7 @@ describe("redesign cutover safety", () => {
       ]);
       expect(
         (await client.query("SELECT * FROM public.__drizzle_migrations")).rows,
-      ).toHaveLength(4);
+      ).toHaveLength(6);
     } finally {
       await client.close();
     }

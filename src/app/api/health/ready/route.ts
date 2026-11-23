@@ -16,6 +16,8 @@ export async function GET() {
       from templates t cross join checklists c cross join checklist_steps s limit 0`);
     await getDatabase().execute(sql`select c.folder_id, f.organization_id
       from checklists c cross join checklist_folders f limit 0`);
+    await getDatabase().execute(sql`select organization_id, version, mime_type, image
+      from organization_logos limit 0`);
     return Response.json({ status: "ready" });
   } catch {
     return Response.json(
