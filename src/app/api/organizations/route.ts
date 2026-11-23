@@ -21,8 +21,11 @@ export async function POST(request: Request) {
       return Response.json({ data: await client.lookupOrganization(input) });
     }
     const input = await readJson(request, organizationEnableSchema);
-    const [created] = await getDatabase().insert(organizations).values(input).onConflictDoUpdate({ target: organizations.itglueId, set: { name: input.name, enabled: true, deletedAt: null, updatedAt: new Date() } }).returning();
-    await recordAudit({ actorUserId: access.user.id, eventType: "organization.enabled", entityType: "organization", entityId: created.id, details: { itglueId: created.itglueId, name: created.name } });
+    const created = await getDatabase().transaction(async (tx) => {
+      const [organization] = await tx.insert(organizations).values(input).onConflictDoUpdate({ target: organizations.itglueId, set: { name: input.name, enabled: true, deletedAt: null, updatedAt: new Date() } }).returning();
+      await recordAudit({ actorUserId: access.user.id, eventType: "organization.enabled", entityType: "organization", entityId: organization.id, details: input }, tx);
+      return organization;
+    });
     return Response.json({ data: created }, { status: 201 });
   } catch (error) { return errorResponse(error); }
 }

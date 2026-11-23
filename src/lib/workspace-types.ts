@@ -72,11 +72,13 @@ export type TemplateContext = {
   templateVersion: number;
   parentVersion: number | null;
 };
+export type ChecklistFolder = { id: string; name: string };
 export type ChecklistSummary = {
   id: string;
   name: string;
   organizationId: string;
   organizationName: string;
+  folderId: string | null;
   templateName: string;
   status: "active" | "completed";
   completed: number;

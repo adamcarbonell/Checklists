@@ -7,7 +7,6 @@ import {
   sql,
   count,
   ilike,
-  or,
   inArray,
 } from "drizzle-orm";
 import { getDatabase } from "@/db/client";
@@ -17,7 +16,8 @@ import {
   checklistSteps,
   users,
 } from "@/db/schema";
-import { loadTemplateContext, loadWorkspace } from "./workspace-data";
+import { loadOrganization, loadTemplateContext, loadWorkspace } from "./workspace-data";
+import { lockChecklistFolder, requireChecklistFolder } from "./checklist-folders";
 import { lockTemplate } from "./template-service";
 import { OrderError } from "./template-order";
 import { recordAudit } from "./audit";
@@ -27,8 +27,15 @@ import type {
   ChecklistSummary,
 } from "./workspace-types";
 import type { RichNode } from "./template-engine";
+type CreateChecklist = {
+  organizationId: string;
+  folderId: string;
+  templateId: string;
+  name?: string;
+  creationKey: string;
+};
 export async function createChecklist(
-  input: { templateId: string; name?: string; creationKey: string },
+  input: CreateChecklist,
   actorUserId: string,
 ) {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -49,7 +56,7 @@ export async function createChecklist(
   throw new OrderError("creation_busy_retry", 409);
 }
 async function createChecklistAttempt(
-  input: { templateId: string; name?: string; creationKey: string },
+  input: CreateChecklist,
   actorUserId: string,
 ) {
   return getDatabase().transaction(
@@ -72,9 +79,13 @@ async function createChecklistAttempt(
         )
         .limit(1);
       if (existing) {
+        const [creation] = await tx.select({ changes: checklistActivity.changes })
+          .from(checklistActivity).where(and(eq(checklistActivity.checklistId, existing.id), eq(checklistActivity.event, "created"))).limit(1);
         if (
           existing.deletedAt ||
+          existing.organizationId !== input.organizationId ||
           existing.templateId !== input.templateId ||
+          creation?.changes.folderId !== input.folderId ||
           (input.name && existing.name !== input.name)
         )
           throw new OrderError("creation_key_conflict", 409);
@@ -87,6 +98,9 @@ async function createChecklistAttempt(
         !template.globalTemplateId
       )
         throw new OrderError("org_template_required");
+      if (template.organizationId !== input.organizationId)
+        throw new OrderError("template_not_found", 404);
+      await lockChecklistFolder(tx, input.organizationId, input.folderId);
       const workspace = await loadWorkspace(template.id, tx),
         context = await loadTemplateContext(
           template.id,
@@ -114,6 +128,7 @@ async function createChecklistAttempt(
           name: input.name || template.name,
           organizationId: template.organizationId,
           organizationName: workspace.organizationName!,
+          folderId: input.folderId,
           templateId: template.id,
           templateName: template.name,
           globalTemplateId: template.globalTemplateId,
@@ -153,6 +168,7 @@ async function createChecklistAttempt(
           changes: {
             templateVersion: created.templateVersion,
             globalTemplateVersion: created.globalTemplateVersion,
+            folderId: input.folderId,
             stepCount: context.steps.length,
             conditionDecisions: context.conditionDecisions ?? [],
           },
@@ -166,6 +182,7 @@ async function createChecklistAttempt(
           details: {
             templateId: template.id,
             organizationId: template.organizationId,
+            folderId: input.folderId,
           },
         },
         tx,
@@ -296,6 +313,29 @@ export async function changeChecklistStep(
     return updated;
   });
 }
+export async function moveChecklist(
+  organizationId: string,
+  id: string,
+  input: { folderId: string; expectedFolderId: string | null },
+  actorUserId: string,
+) {
+  return getDatabase().transaction(async (tx) => {
+    if (!await loadOrganization(organizationId, tx)) throw new OrderError("organization_not_found", 404);
+    const [row] = await tx.select({ folderId: checklists.folderId }).from(checklists).where(and(
+      eq(checklists.id, id), eq(checklists.organizationId, organizationId), isNull(checklists.deletedAt),
+    )).for("update");
+    if (!row) throw new OrderError("checklist_not_found", 404);
+    if (row.folderId !== input.expectedFolderId) throw new OrderError("checklist_folder_changed", 409);
+    if (row.folderId === input.folderId) return;
+    const destination = await lockChecklistFolder(tx, organizationId, input.folderId);
+    const changes = { fromFolderId: row.folderId, toFolderId: destination.id, toFolderName: destination.name };
+    await tx.update(checklists).set({ folderId: destination.id, updatedAt: new Date() }).where(eq(checklists.id, id));
+    await tx.insert(checklistActivity).values({ checklistId: id, actorUserId, event: "moved_to_folder", changes });
+    await recordAudit({ actorUserId, eventType: "checklist.moved_to_folder", entityType: "checklist", entityId: id,
+      details: { organizationId, ...changes } }, tx);
+  });
+}
+
 function summary(
   row: typeof checklists.$inferSelect,
   stats: { completed: number; skipped: number; total: number },
@@ -305,6 +345,7 @@ function summary(
     name: row.name,
     organizationId: row.organizationId,
     organizationName: row.organizationName,
+    folderId: row.folderId,
     templateName: row.templateName,
     status: row.status,
     ...stats,
@@ -315,28 +356,24 @@ function summary(
 }
 export async function listChecklists(
   filters: {
-    organizationId?: string;
+    organizationId: string;
+    folderId?: string;
     status?: "active" | "completed";
     search?: string;
     includeDeleted?: boolean;
     page?: number;
-  } = {},
+  },
 ) {
+  if (!await loadOrganization(filters.organizationId)) throw new OrderError("organization_not_found", 404);
+  if (filters.folderId) await requireChecklistFolder(filters.organizationId, filters.folderId);
   const db = getDatabase(),
     conditions = and(
       filters.includeDeleted ? undefined : isNull(checklists.deletedAt),
-      filters.organizationId
-        ? eq(checklists.organizationId, filters.organizationId)
-        : undefined,
+      eq(checklists.organizationId, filters.organizationId),
+      filters.folderId ? eq(checklists.folderId, filters.folderId) : isNull(checklists.folderId),
       filters.status ? eq(checklists.status, filters.status) : undefined,
       filters.search
-        ? or(
-            ilike(checklists.name, "%" + escapeLike(filters.search) + "%"),
-            ilike(
-              checklists.organizationName,
-              "%" + escapeLike(filters.search) + "%",
-            ),
-          )
+        ? ilike(checklists.name, "%" + escapeLike(filters.search) + "%")
         : undefined,
     );
   const [rows, totalRows] = await Promise.all([
@@ -392,6 +429,7 @@ export async function listChecklists(
 export async function loadChecklist(
   id: string,
   includeDeleted = false,
+  organizationId?: string,
 ): Promise<ChecklistDetail | null> {
   const db = getDatabase(),
     [row] = await db
@@ -400,6 +438,7 @@ export async function loadChecklist(
       .where(
         and(
           eq(checklists.id, id),
+          organizationId ? eq(checklists.organizationId, organizationId) : undefined,
           includeDeleted ? undefined : isNull(checklists.deletedAt),
         ),
       )

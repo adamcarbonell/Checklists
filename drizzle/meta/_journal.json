@@ -22,6 +22,13 @@
       "when": 1792087200000,
       "tag": "0002_conditional_groups",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795410461259,
+      "tag": "0003_organization_checklist_folders",
+      "breakpoints": true
     }
   ]
 }

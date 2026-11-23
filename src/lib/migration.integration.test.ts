@@ -9,7 +9,7 @@ import { seedVariableDefinitions } from "./seed";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { applyMigrations } from "./migration-runner";
 describe("redesign cutover safety", () => {
-  it("adds conditional schema without changing existing content, progress, mappings, or history", async () => {
+  it("adds conditions and folders while preserving existing content, progress, mappings, and history", async () => {
     const client = new PGlite();
     try {
       const db = drizzle(client, { schema }) as unknown as Database;
@@ -31,9 +31,24 @@ describe("redesign cutover safety", () => {
       await seedVariableDefinitions(db);
       const tables=["templates","revisions","checklists","checklist_steps","checklist_activity","variable_definitions","organizations","users","audit_events"];
       const before=await Promise.all(tables.map(async(table)=>(await client.query(`SELECT * FROM ${table} ORDER BY id`)).rows));
+      expect(await applyMigrations(db,migrations.slice(0,3),[])).toBe(1);
       expect(await applyMigrations(db,migrations,[])).toBe(1);
       expect(await applyMigrations(db,migrations,[])).toBe(0);
-      expect(await Promise.all(tables.map(async(table)=>(await client.query(`SELECT * FROM ${table} ORDER BY id`)).rows))).toEqual(before);
+      expect(await Promise.all(tables.map(async (table) => {
+        const { rows } = await client.query<Record<string, unknown>>(`SELECT * FROM ${table} ORDER BY id`);
+        return table === "checklists" ? rows.map(({ folder_id, ...rest }) => {
+          expect(folder_id).toBeNull();
+          return rest;
+        }) : rows;
+      }))).toEqual(before);
+      const names = ["Computer Offboarding", "New Computer", "New Employee", "User Offboarding"];
+      const folders = await db.select().from(schema.checklistFolders);
+      expect(folders.map((folder) => folder.name).sort()).toEqual(names);
+      expect(folders.every((folder) => folder.organizationId === org)).toBe(true);
+      const [newOrg] = await db.insert(schema.organizations).values({ itglueId: "2", name: "New organization" }).returning();
+      const newFolders = (await db.select().from(schema.checklistFolders)).filter((folder) => folder.organizationId === newOrg.id);
+      expect(newFolders.map((folder) => folder.name).sort()).toEqual(names);
+      await expect(client.query("UPDATE checklists SET folder_id = $1 WHERE id = $2", [newFolders[0].id, run])).rejects.toMatchObject({ code: "23503" });
       expect(await db.select().from(schema.templateItems)).toMatchObject([{id:step,title:"Keep spaces  ",version:7,nodeType:"step",parentBranchId:null}]);
       expect(await db.select().from(schema.templateBranches)).toEqual([]);
     } finally { await client.close(); }
@@ -53,7 +68,7 @@ describe("redesign cutover safety", () => {
       ]);
       expect(
         await applyMigrations(db, migrations, ["--confirm-template-reset"]),
-      ).toBe(2);
+      ).toBe(3);
       await db
         .insert(schema.templates)
         .values({ name: "New template", scope: "global" });
@@ -63,7 +78,7 @@ describe("redesign cutover safety", () => {
       ]);
       expect(
         (await client.query("SELECT * FROM public.__drizzle_migrations")).rows,
-      ).toHaveLength(3);
+      ).toHaveLength(4);
     } finally {
       await client.close();
     }

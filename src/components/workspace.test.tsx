@@ -175,6 +175,7 @@ const templateContext: TemplateContext = {
   parentVersion: 3,
 };
 const runFixture: ChecklistDetail = {
+  folderId: null,
   id: "run",
   name: "New hire",
   organizationId: "org-1",
@@ -300,7 +301,7 @@ beforeEach(() => {
           result = { data: step };
         } else if (url === "/api/templates" && method === "POST")
           result = { data: { id: "created-template" } };
-        else if (url === "/api/checklists" && method === "POST")
+        else if (url === "/api/organizations/org-1/checklists" && method === "POST")
           result = { data: { id: "created-run" } };
         else if (url.includes("/steps/") && method === "PATCH") {
           if (forceConflict) {
@@ -344,7 +345,7 @@ beforeEach(() => {
           result = { data: [], page: 1, hasMore: false };
         else if (url.startsWith("/api/checklists/run"))
           result = { data: structuredClone(run) };
-        else if (url.startsWith("/api/checklists?"))
+        else if (url.includes("/checklists?"))
           result = { data: [], total: 0, page: 1, pageSize: 50 };
         return Response.json(result);
       },
@@ -635,9 +636,7 @@ describe("new template authoring", () => {
     expect(
       screen.getByRole("link", { name: "Organizations" }).getAttribute("href"),
     ).toBe("/organizations");
-    expect(
-      screen.getByRole("link", { name: "Checklists" }).getAttribute("href"),
-    ).toBe("/");
+    expect(screen.queryByRole("link", { name: /^Checklists$/ })).toBeNull();
   });
   it("creates an organization template with a fixed parent and default inherited name", async () => {
     render(
@@ -684,29 +683,44 @@ describe("new template authoring", () => {
 });
 describe("shared runnable checklist controls", () => {
   it("lets viewers create frozen checklists using an idempotency key", async () => {
+    const folder = { id: "employee", name: "New Employee" };
     render(
       <ChecklistBoard
         initial={{ data: [], total: 0, page: 1, pageSize: 50 }}
-        organizations={fixture.organizations}
+        organization={fixture.organizations[0]}
+        folders={[folder]}
         templates={[child]}
         user={viewer}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "New checklist" }));
+    expect((screen.getByRole("button", { name: "Create checklist" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("link", { name: "Open organization templates" })).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: "Checklist folder" }), { target: { value: folder.id } });
     expect(
       (screen.getByLabelText("Checklist name") as HTMLInputElement).value,
     ).toBe("Client onboarding");
     fireEvent.click(screen.getByRole("button", { name: "Create checklist" }));
     await waitFor(() =>
-      expect(mocks.push).toHaveBeenCalledWith("/checklists/created-run"),
+      expect(mocks.push).toHaveBeenCalledWith("/organizations/org-1/checklists/created-run"),
     );
     expect(
       requests.find((request) => request.method === "POST")?.body,
     ).toMatchObject({
       templateId: "child",
+      folderId: folder.id,
       name: "Client onboarding",
       creationKey: expect.any(String),
     });
+  });
+  it("uses the open folder and only offers active templates from this organization", async () => {
+    const folder = { id: "computer", name: "New Computer" };
+    render(<ChecklistBoard initial={{ data: [], total: 0, page: 1, pageSize: 50 }} organization={fixture.organizations[0]} folders={[folder]} folder={folder} templates={[child, { ...child, id: "other", organizationId: "org-2" }, { ...child, id: "archived", deletedAt: "2026-11-22" }]} user={user} />);
+    fireEvent.click(screen.getByRole("button", { name: "New checklist" }));
+    expect(screen.queryByRole("combobox", { name: "Checklist folder" })).toBeNull();
+    expect(screen.getAllByRole("option", { name: "Client onboarding" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Create checklist" }));
+    await waitFor(() => expect(requests.find((entry) => entry.method === "POST")?.body).toMatchObject({ folderId: folder.id, templateId: child.id }));
   });
   it("lets viewers complete steps while instructions stay immutable", async () => {
     render(<ChecklistRun initial={run} user={viewer} />);

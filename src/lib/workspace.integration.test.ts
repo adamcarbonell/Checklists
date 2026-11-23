@@ -64,7 +64,7 @@ import {
   orderEntry,
 } from "./template-order";
 import {
-  createChecklist,
+  createChecklist as createFiledChecklist,
   changeChecklistStep,
   loadChecklist,
   listChecklists,
@@ -74,7 +74,12 @@ import {
 import {
   POST as createRunRoute,
   GET as listRunsRoute,
-} from "@/app/api/checklists/route";
+} from "@/app/api/organizations/[id]/checklists/route";
+import { POST as enableOrgRoute } from "@/app/api/organizations/route";
+import { POST as createFolderRoute } from "@/app/api/organizations/[id]/folders/route";
+import { DELETE as deleteFolderRoute, PATCH as renameFolderRoute } from "@/app/api/organizations/[id]/folders/[folderId]/route";
+import { PATCH as moveRunRoute } from "@/app/api/organizations/[id]/checklists/[checklistId]/folder/route";
+import { loadChecklistFolders } from "./checklist-folders";
 import { PATCH as progressRoute } from "@/app/api/checklists/[id]/steps/[stepId]/route";
 import { DELETE as deleteRunRoute } from "@/app/api/checklists/[id]/route";
 import { POST as restoreRunRoute } from "@/app/api/checklists/[id]/restore/route";
@@ -105,6 +110,8 @@ let globalId: string,
   childB: string,
   orgA: string,
   orgB: string,
+  folderA: string,
+  folderB: string,
   first: string,
   repeated: string,
   localA: string,
@@ -123,6 +130,13 @@ const request = (
     body: JSON.stringify(body),
   });
 const context = (id: string) => ({ params: Promise.resolve({ id }) });
+async function createChecklist(input: { templateId: string; name?: string; creationKey: string }, actorId: string) {
+  const [template] = await state.db.select({ organizationId: schema.templates.organizationId })
+    .from(schema.templates).where(eq(schema.templates.id, input.templateId));
+  const organizationId = template?.organizationId ?? orgA;
+  const folder = (await loadChecklistFolders(organizationId)).find((entry) => entry.name === "New Employee")!;
+  return createFiledChecklist({ ...input, organizationId, folderId: folder.id }, actorId);
+}
 beforeAll(async () => {
   await client.exec(
     await readFile("drizzle/0000_fixed_marten_broadcloak.sql", "utf8"),
@@ -132,6 +146,7 @@ beforeAll(async () => {
   );
   state.db = drizzle(client, { schema }) as unknown as Database;
   await client.exec(await readFile("drizzle/0002_conditional_groups.sql", "utf8"));
+  await client.exec(await readFile("drizzle/0003_organization_checklist_folders.sql", "utf8"));
 }, 30000);
 afterAll(async () => client.close());
 beforeEach(async () => {
@@ -168,6 +183,9 @@ beforeEach(async () => {
     .returning();
   orgA = orgs[0].id;
   orgB = orgs[1].id;
+  [folderA, folderB] = await Promise.all([orgA, orgB].map(async (id) =>
+    (await loadChecklistFolders(id)).find((entry) => entry.name === "New Employee")!.id,
+  ));
   const defs = await state.db
     .insert(schema.variableDefinitions)
     .values([
@@ -427,7 +445,8 @@ describe("conditional transactions and inheritance", () => {
     expect((await groupPost(request({}),context(f.parent.id))).status).toBe(403);
     expect((await groupPatch(request({title:"No",expectedVersion:2},"PATCH"),{params:Promise.resolve({id:f.parent.id,groupId:f.group.id})})).status).toBe(403);
     expect((await branchPost(request({condition:null,expectedVersion:2}),{params:Promise.resolve({id:f.parent.id,groupId:f.group.id})})).status).toBe(403);
-    expect((await createRunRoute(request({templateId:f.child.id,creationKey:randomUUID()}))).status).toBe(201);
+    const [folder] = await loadChecklistFolders(orgA);
+    expect((await createRunRoute(request({templateId:f.child.id,folderId:folder.id,creationKey:randomUUID()}), context(orgA))).status).toBe(201);
     state.enabled=false;
     expect((await groupPost(request({}),context(f.parent.id))).status).toBe(401);
   });
@@ -1399,12 +1418,64 @@ describe("frozen shared checklists", () => {
       state.actor,
     );
     expect(
-      (await listChecklists({ organizationId: orgA })).data.map(
+      (await listChecklists({ organizationId: orgA, folderId: folderA })).data.map(
         (run) => run.id,
       ),
     ).toEqual([a.id]);
-    expect((await listChecklists({ search: "New hire" })).total).toBe(1);
-    expect((await listChecklists({ status: "completed" })).total).toBe(0);
+    expect((await listChecklists({ organizationId: orgA, folderId: folderA, search: "New hire" })).total).toBe(1);
+    expect((await listChecklists({ organizationId: orgA, folderId: folderA, status: "completed" })).total).toBe(0);
+    expect((await listChecklists({ organizationId: orgA })).total).toBe(0);
+  });
+});
+describe("organization checklist folders", () => {
+  it("creates all four folders once, then preserves customized folders on re-enable", async () => {
+    const data = { itglueId: "111", name: "New org" };
+    const created = await enableOrgRoute(request(data));
+    expect(created.status).toBe(201);
+    const organizationId = (await created.json()).data.id;
+    const folders = await loadChecklistFolders(organizationId);
+    expect(folders.map((entry) => entry.name)).toEqual(["Computer Offboarding", "New Computer", "New Employee", "User Offboarding"]);
+    const first = folders[0];
+    const folderContext = { params: Promise.resolve({ id: organizationId, folderId: first.id }) };
+    expect((await renameFolderRoute(request({ name: "Custom offboarding" }, "PATCH"), folderContext)).status).toBe(200);
+    expect((await enableOrgRoute(request(data))).status).toBe(201);
+    const reenabled = await loadChecklistFolders(organizationId);
+    expect(reenabled).toHaveLength(4);
+    expect(reenabled).toContainEqual({ id: first.id, name: "Custom offboarding" });
+  });
+  it("rejects foreign resources and protects occupied folders even while their checklist is archived", async () => {
+    const payload = { templateId: childA, folderId: folderB, creationKey: randomUUID() };
+    expect((await createRunRoute(request(payload), context(orgA))).status).toBe(404);
+    expect((await createRunRoute(request({ ...payload, templateId: childB, folderId: folderA }), context(orgA))).status).toBe(404);
+    expect((await listRunsRoute(new Request(`http://localhost/api?folderId=${folderB}`), context(orgA))).status).toBe(404);
+    expect((await createFolderRoute(request({ name: "new employee" }), context(orgA))).status).toBe(409);
+    const run = await createChecklist({ templateId: childA, creationKey: randomUUID() }, state.actor);
+    expect(await loadChecklist(run.id, false, orgB)).toBeNull();
+    await setChecklistDeleted(run.id, true, state.actor);
+    expect((await deleteFolderRoute(new Request("http://localhost/api", { method: "DELETE" }), { params: Promise.resolve({ id: orgA, folderId: folderA }) })).status).toBe(409);
+    await setChecklistDeleted(run.id, false, state.actor);
+    expect((await loadChecklist(run.id))?.folderId).toBe(folderA);
+  });
+  it("moves only within the org, preserves a checklist and its progress, and keeps its original retry destination", async () => {
+    const [destination] = await state.db.insert(schema.checklistFolders).values({ organizationId: orgA, name: "Transfer" }).returning();
+    const input = { templateId: childA, folderId: folderA, organizationId: orgA, creationKey: randomUUID() };
+    const run = await createFiledChecklist(input, state.actor);
+    const [step] = (await loadChecklist(run.id))!.steps;
+    await changeChecklistStep(run.id, step.id, { expectedVersion: 1, status: "completed", notes: "Done" }, state.actor);
+    const before = (await loadChecklist(run.id))!;
+    const routeContext = { params: Promise.resolve({ id: orgA, checklistId: run.id }) };
+    const move = (folderId: string) => moveRunRoute(request({ folderId, expectedFolderId: folderA }, "PATCH"), routeContext);
+    state.role = "viewer";
+    expect((await move(destination.id)).status).toBe(403);
+    expect((await createFolderRoute(request({ name: "Denied" }), context(orgA))).status).toBe(403);
+    state.role = "editor";
+    expect((await move(folderB)).status).toBe(404);
+    expect((await move(destination.id)).status).toBe(204);
+    expect((await move(destination.id)).status).toBe(409);
+    expect((await loadChecklist(run.id))).toEqual({ ...before, folderId: destination.id });
+    expect((await loadActivity(run.id)).data.some((entry) => entry.event === "moved_to_folder")).toBe(true);
+    expect((await createFiledChecklist(input, state.actor)).id).toBe(run.id);
+    await expect(createFiledChecklist({ ...input, folderId: destination.id }, state.actor)).rejects.toMatchObject({ status: 409 });
   });
 });
 describe("role and session boundaries", () => {
@@ -1440,7 +1511,7 @@ describe("role and session boundaries", () => {
     ])
       expect(response.status).toBe(403);
     const created = await createRunRoute(
-      request({ templateId: childA, creationKey: randomUUID() }),
+      request({ templateId: childA, folderId: folderA, creationKey: randomUUID() }), context(orgA),
     );
     expect(created.status).toBe(201);
     const id = (await created.json()).data.id,
@@ -1472,7 +1543,7 @@ describe("role and session boundaries", () => {
     expect(
       (
         await listRunsRoute(
-          new Request("http://localhost/api?includeDeleted=true"),
+          new Request("http://localhost/api?includeDeleted=true"), context(orgA),
         )
       ).status,
     ).toBe(403);
@@ -1488,12 +1559,12 @@ describe("role and session boundaries", () => {
       .set({ disabled: true })
       .where(eq(schema.users.id, state.actor));
     expect(
-      (await listRunsRoute(new Request("http://localhost/api"))).status,
+      (await listRunsRoute(new Request("http://localhost/api"), context(orgA))).status,
     ).toBe(401);
     expect(
       (
         await createRunRoute(
-          request({ templateId: childA, creationKey: randomUUID() }),
+          request({ templateId: childA, folderId: folderA, creationKey: randomUUID() }), context(orgA),
         )
       ).status,
     ).toBe(401);

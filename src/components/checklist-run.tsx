@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import type {
   ActivityEntry,
   ChecklistDetail,
+  ChecklistFolder,
   ChecklistStep,
   WorkspaceUser,
 } from "@/lib/workspace-types";
@@ -16,13 +17,16 @@ import {
   api,
 } from "./workspace-ui";
 import { RichInstructions } from "./rich-instructions";
+import { checklistPath, organizationPath } from "@/lib/organization-paths";
 type Draft = { value: string; expectedVersion: number };
 export function ChecklistRun({
   initial,
   user,
+  folders = [],
 }: {
   initial: ChecklistDetail;
   user: WorkspaceUser;
+  folders?: ChecklistFolder[];
 }) {
   const router = useRouter(),
     [data, setData] = useState(initial),
@@ -35,6 +39,7 @@ export function ChecklistRun({
       page: number;
       hasMore: boolean;
     } | null>(null),
+    [move, setMove] = useState<{ expectedFolderId: string | null; destinationId: string } | null>(null),
     [page, setPage] = useState(1),
     [gate] = useState(() => new MutationGate());
   async function fetchLatest() {
@@ -125,17 +130,24 @@ export function ChecklistRun({
   }
   const visible = data.steps.slice((page - 1) * 50, page * 50);
   const terminal = data.completed + data.skipped;
+  const folder = folders.find((entry) => entry.id === data.folderId);
+  const returnPath = organizationPath(data.organizationId, data.folderId);
+  const canMove = user.role !== "viewer" && !data.deletedAt && folders.some((entry) => entry.id !== data.folderId);
   return (
     <WorkspaceShell
       user={user}
-      active="checklists"
+      active="organizations"
       beforeNavigate={beforeNavigate}
     >
       <header className="flex flex-wrap items-center justify-between gap-3 border-b bg-white px-6 py-5">
         <div>
-          <p className="text-xs text-slate-500">
-            {data.organizationName} / {data.templateName}
-          </p>
+          <a href={returnPath} className="text-xs text-teal-800 underline" onClick={(event) => {
+            if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            void action(async () => router.push(returnPath), true);
+          }}>
+            {data.organizationName} / {folder?.name ?? (data.folderId ? "Folder" : "Unfiled checklists")}
+          </a>
           <h1 className="mt-1 text-xl font-semibold">{data.name}</h1>
           <p className="mt-2 text-xs text-slate-500">
             Frozen at creation · org template v{data.templateVersion} · global
@@ -161,6 +173,10 @@ export function ChecklistRun({
           >
             Activity
           </button>
+          {canMove && <button type="button" disabled={busy} className="rounded-xl border px-3 py-2 text-sm" onClick={() => {
+            setError("");
+            setMove({ expectedFolderId: data.folderId, destinationId: "" });
+          }}>Move to folder</button>}
           {user.role === "admin" && (
             <ActionMenu
               label="Checklist actions"
@@ -172,7 +188,7 @@ export function ChecklistRun({
                   danger: !data.deletedAt,
                   disabled: busy,
                   onClick: () =>
-                    action(async () => {
+                    action(async (current) => {
                       if (
                         !window.confirm(
                           data.deletedAt
@@ -186,7 +202,7 @@ export function ChecklistRun({
                         data.deletedAt ? "POST" : "DELETE",
                       );
                       if (data.deletedAt) await fetchLatest();
-                      else router.push("/");
+                      else router.push(organizationPath(current.organizationId, current.folderId));
                     }, true),
                 },
               ]}
@@ -426,6 +442,32 @@ export function ChecklistRun({
             });
           }}
         />
+      )}
+      {move && (
+        <Modal title="Move checklist" onClose={() => { if (!busy) setMove(null); }}>
+          <form className="space-y-4" onSubmit={(event) => {
+            event.preventDefault();
+            if (!move.destinationId) return;
+            void action(async (current) => {
+              await api(`/api${checklistPath(current.organizationId, current.id)}/folder`, "PATCH", {
+                folderId: move.destinationId, expectedFolderId: move.expectedFolderId,
+              });
+              setData((latest) => ({ ...latest, folderId: move.destinationId }));
+              setMove(null);
+            }, true);
+          }}>
+            <label className="block text-sm">
+              Destination folder
+              <select required disabled={busy} value={move.destinationId} className="mt-2 w-full rounded-xl border p-3"
+                onChange={(event) => setMove({ ...move, destinationId: event.target.value })}>
+                <option value="">Choose a folder</option>
+                {folders.filter((entry) => entry.id !== move.expectedFolderId).map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
+              </select>
+            </label>
+            {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
+            <button disabled={busy || !move.destinationId} className="rounded-xl bg-teal-700 px-4 py-2 text-sm text-white disabled:opacity-40">Move checklist</button>
+          </form>
+        </Modal>
       )}
       {activity && (
         <Modal title="Checklist activity" onClose={() => setActivity(null)}>

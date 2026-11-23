@@ -1,9 +1,11 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { z } from "zod";
 import { signedInPage } from "@/lib/page-access";
 import { hasDatabase } from "@/db/client";
-import { loadChecklist } from "@/lib/checklist-service";
-import { ChecklistRun } from "@/components/checklist-run";
+import { and, eq, isNull } from "drizzle-orm";
+import { getDatabase } from "@/db/client";
+import { checklists } from "@/db/schema";
+import { checklistPath } from "@/lib/organization-paths";
 export const dynamic = "force-dynamic";
 export default async function Checklist({
   params,
@@ -13,7 +15,8 @@ export default async function Checklist({
   const { id } = await params,
     user = await signedInPage(`/checklists/${id}`);
   if (!z.uuid().safeParse(id).success || !hasDatabase()) notFound();
-  const data = await loadChecklist(id, user.role === "admin");
+  const [data] = await getDatabase().select({ organizationId: checklists.organizationId }).from(checklists)
+    .where(and(eq(checklists.id, id), user.role === "admin" ? undefined : isNull(checklists.deletedAt))).limit(1);
   if (!data) notFound();
-  return <ChecklistRun key={id} initial={data} user={user} />;
+  redirect(checklistPath(data.organizationId, id));
 }

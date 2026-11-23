@@ -1,6 +1,7 @@
 import {
   boolean,
   check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -213,6 +214,21 @@ export const templateBranches = pgTable("template_condition_branches", {
   ...timestamps,
 }, (table) => [index("template_branches_group_idx").on(table.groupItemId, table.deletedAt, table.position)]);
 
+export const checklistFolders = pgTable(
+  "checklist_folders",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: uuid("organization_id").notNull().references(() => organizations.id),
+    name: text("name").notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("checklist_folders_org_id_uidx").on(table.organizationId, table.id),
+    uniqueIndex("checklist_folders_org_name_uidx").on(table.organizationId, sql`lower(${table.name})`),
+    check("checklist_folder_name_check", sql`char_length(${table.name}) between 1 and 100 and ${table.name} = btrim(${table.name})`),
+  ],
+);
+
 export const checklists = pgTable(
   "checklists",
   {
@@ -222,6 +238,7 @@ export const checklists = pgTable(
       .notNull()
       .references(() => organizations.id),
     organizationName: text("organization_name").notNull(),
+    folderId: uuid("folder_id"),
     templateId: uuid("template_id")
       .notNull()
       .references(() => templates.id),
@@ -247,6 +264,12 @@ export const checklists = pgTable(
     ...timestamps,
   },
   (table) => [
+    foreignKey({
+      name: "checklists_org_folder_fk",
+      columns: [table.organizationId, table.folderId],
+      foreignColumns: [checklistFolders.organizationId, checklistFolders.id],
+    }).onDelete("restrict"),
+    index("checklists_org_folder_idx").on(table.organizationId, table.folderId, table.createdAt, table.id),
     uniqueIndex("checklists_creation_uidx").on(
       table.createdBy,
       table.creationKey,

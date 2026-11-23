@@ -1,10 +1,6 @@
 import { redirect } from "next/navigation";
 import { authConfigured } from "@/auth";
 import { signedInPage } from "@/lib/page-access";
-import { hasDatabase } from "@/db/client";
-import { listChecklists } from "@/lib/checklist-service";
-import { loadOrganizations, loadTemplates } from "@/lib/workspace-data";
-import { ChecklistBoard } from "@/components/checklist-board";
 export const dynamic = "force-dynamic";
 export default async function Home({
   searchParams,
@@ -24,24 +20,8 @@ export default async function Home({
         </section>
       </main>
     );
-  const user = await signedInPage();
+  await signedInPage();
   const { templateId } = await searchParams;
   if (templateId) redirect("/templates/" + encodeURIComponent(templateId));
-  const available = hasDatabase(),
-    [initial, organizations, templates] = available
-      ? await Promise.all([
-          listChecklists({ status: "active" }),
-          loadOrganizations(),
-          loadTemplates({ scope: "organization" }),
-        ])
-      : [{ data: [], total: 0, page: 1, pageSize: 50 }, [], []];
-  return (
-    <ChecklistBoard
-      initial={initial}
-      organizations={organizations}
-      templates={templates}
-      user={user}
-      databaseAvailable={available}
-    />
-  );
+  redirect("/organizations");
 }

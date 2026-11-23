@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { TemplateSummary, WorkspaceUser } from "@/lib/workspace-types";
 import { WorkspaceShell, Modal, HistoryDialog, api } from "./workspace-ui";
+import { organizationPath } from "@/lib/organization-paths";
 export function TemplateCatalog({
   initial,
   globals,
@@ -42,10 +43,10 @@ export function TemplateCatalog({
         <div>
           <p className="text-xs text-slate-500">
             {organization
-              ? "Organizations / Templates"
+              ? <a className="underline" href={organizationPath(organization.id)}>Back to {organization.name}</a>
               : "Workspace / Global templates"}
           </p>
-          <h1 className="mt-1 text-xl font-semibold">{title}</h1>
+          <h1 className="mt-1 text-xl font-semibold">{organization ? `${title} templates` : title}</h1>
           <p className="mt-2 text-sm text-slate-500">
             {organization
               ? "Link a global template and add steps that belong only to this client’s template."

@@ -28,6 +28,11 @@ import type {
 import { conditionFields } from "./conditional-types";
 import { workspaceItems } from "./conditional-tree";
 type Reader = Database | DatabaseTransaction;
+export async function loadOrganization(id: string, db: Reader = getDatabase()) {
+  const [organization] = await db.select({ id: organizations.id, name: organizations.name })
+    .from(organizations).where(and(eq(organizations.id, id), eq(organizations.enabled, true), isNull(organizations.deletedAt))).limit(1);
+  return organization ?? null;
+}
 export async function loadOrganizations(db: Reader = getDatabase()) {
   return db
     .select({ id: organizations.id, name: organizations.name })

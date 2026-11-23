@@ -3,7 +3,6 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } f
 import { createPortal } from "react-dom";
 import {
   BookOpenCheck,
-  ListChecks,
   Layers3,
   AppWindow,
   Variable,
@@ -102,6 +101,10 @@ export async function api(url: string, method = "GET", body?: unknown) {
       invalid_request_body: "Check the required fields before saving.",
       request_failed: "The request could not be completed. Try again.",
       forbidden: "Your role does not allow this action.",
+      folder_not_found: "That folder no longer exists in this organization.",
+      folder_name_taken: "This organization already has a folder with that name.",
+      folder_not_empty: "This folder still contains checklists. Archived checklists count too.",
+      checklist_folder_changed: "The checklist was moved by someone else. Refresh and try again.",
       unauthorized: "Your session expired. Sign in again.",
     };
     throw new Error(
@@ -142,7 +145,7 @@ export function WorkspaceShell({
   children,
 }: {
   user: WorkspaceUser;
-  active: "templates" | "organizations" | "checklists";
+  active: "templates" | "organizations";
   counts?: Record<string, number>;
   beforeNavigate?: () => Promise<void>;
   children: ReactNode;
@@ -151,18 +154,17 @@ export function WorkspaceShell({
   const [error, setError] = useState("");
   const router = useRouter();
   const links = [
-    { key: "checklists", label: "Checklists", href: "/", icon: ListChecks },
-    {
-      key: "templates",
-      label: "Global templates",
-      href: "/global-templates",
-      icon: Layers3,
-    },
     {
       key: "organizations",
       label: "Organizations",
       href: "/organizations",
       icon: AppWindow,
+    },
+    {
+      key: "templates",
+      label: "Global templates",
+      href: "/global-templates",
+      icon: Layers3,
     },
     ...(user.role === "admin"
       ? [
