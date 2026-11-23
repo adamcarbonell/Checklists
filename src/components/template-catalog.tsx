@@ -260,7 +260,7 @@ export function OrganizationDirectory({
         <div>
           <h1 className="text-xl font-semibold">Organizations</h1>
           <p className="mt-2 text-sm text-slate-500">
-            Manage each client’s linked templates and local instructions.
+            Open a client to find its checklist folders and unfiled checklists.
           </p>
         </div>
         {user.role === "admin" && (
@@ -293,7 +293,7 @@ export function OrganizationDirectory({
               >
                 <h2 className="font-semibold">{org.name}</h2>
                 <p className="mt-2 text-sm text-teal-700">
-                  Open organization templates →
+                  Open organization →
                 </p>
               </a>
             ))}

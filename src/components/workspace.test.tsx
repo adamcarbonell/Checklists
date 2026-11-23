@@ -666,7 +666,7 @@ describe("new template authoring", () => {
       globalTemplateId: "parent",
     });
   });
-  it("lets viewers browse organization templates without exposing admin management", () => {
+  it("lets viewers open an organization without exposing template or IT Glue management", () => {
     render(
       <OrganizationDirectory
         organizations={fixture.organizations}
@@ -674,11 +674,12 @@ describe("new template authoring", () => {
       />,
     );
     expect(
-      screen.getByRole("link", { name: /Client One/ }).getAttribute("href"),
+      screen.getByRole("link", { name: /Client One Open organization/ }).getAttribute("href"),
     ).toBe("/organizations/org-1");
     expect(
       screen.queryByRole("link", { name: "Manage IT Glue organizations" }),
     ).toBeNull();
+    expect(screen.queryByText(/Open organization templates/)).toBeNull();
   });
 });
 describe("shared runnable checklist controls", () => {
